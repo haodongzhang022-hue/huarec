@@ -1,0 +1,69 @@
+# HuaRec 花录 · 电影感网页录屏
+
+一键起录、本地秒存、自带电影感运镜与 macOS 风背景的 Chrome 网页录屏插件。
+
+## 项目基础信息
+
+| 项 | 内容 |
+|---|---|
+| 名称 | HuaRec 花录 · 电影感网页录屏 |
+| 版本 | 0.2.0 |
+| 类型 | Chrome 扩展(Manifest V3) |
+| 运行环境 | Chrome / Edge 等 Chromium 内核浏览器,支持 `chrome.tabCapture` 与 `offscreen` |
+| 录制范围 | 当前标签页(http/https) |
+| 数据存储 | 全本地,IndexedDB 存视频与光标轨迹,不登录、不上传 |
+| 导出格式 | MP4 / WebM / GIF(WebCodecs 离线编码,不支持时回退 MediaRecorder) |
+| 快捷键 | `Alt+Shift+R` 开始 / 停止 |
+| 权限 | `tabCapture` / `offscreen` / `storage` / `scripting` / `activeTab` / `alarms` |
+| 技术栈 | 原生 JS(ES Module)+ Canvas 2D + WebCodecs + IndexedDB,无构建步骤、无第三方框架 |
+
+## 它和别人不一样的地方
+
+- **快**:点图标或按 `Alt+Shift+R` 立刻起录;停止后视频本地直存,不登录、不上传、不等云端渲染。
+- **酷**:借鉴 Screen Studio 的做法——录的是干净网页画面(`tabCapture`),录制时把光标换成干净的 macOS 风箭头;编辑器里再合成「跟随点击的自动运镜 + 点击波纹 + macOS 壁纸风背景 + 圆角阴影」。
+- **能剪**:胶片缩略图时间轴,拖选区即可删掉中间废片段、给片段变速,键盘快捷键 + 撤销,轻量但够用。
+
+## 安装(开发者模式加载)
+
+1. Chrome 打开 `chrome://extensions`
+2. 右上角打开「开发者模式」
+3. 点「加载已解压的扩展程序」,选择本文件夹 `HuaRec-花录`
+4. 建议把 HuaRec 图标固定到工具栏
+
+## 使用
+
+1. 在任意普通网页(http/https)上点 HuaRec 图标 → 点「开始录制」(或直接按 `Alt+Shift+R`)
+2. 弹窗自动关闭,正常操作网页;录制全程画面干净,**不会有任何控制条被录进去**
+3. 要暂停 / 停止时:再点一次工具栏的 HuaRec 图标 → 弹窗里有计时、暂停、「停止并编辑」(或「停止·直接下载源片」跳过编辑器),也可直接按 `Alt+Shift+R` 停止
+4. 停止后自动打开编辑器(默认进「美化」)
+5. 编辑器里实时调:背景(macOS 风)/ 留白 / 圆角 / 阴影 / 自动运镜倍数 / 点击波纹;在胶片轨道上拖选区删片段或变速
+6. 选导出尺寸(原始 / 1080p / 720p)与格式(MP4 / WebM / GIF)点「导出」,或「原始录像」拿未加工版本
+
+> 美化都在录制**之后**的编辑器里调,所见即所得——所以起录前不用做任何选择,点一下就录。
+
+录制库:点编辑器顶栏或 popup 的「最近」,可重新打开、删除历史录制。
+
+## 已知边界
+
+- 只录**当前标签页**,不录整个桌面 / 其他应用窗口。
+- 变速段的音频用 WSOLA 时间拉伸,**变速不变调**(无花栗鼠声)。
+- 录制控制(计时/暂停/停止)在工具栏弹窗里,不在网页上——任何浮在网页上看得见的东西都会被 `tabCapture` 录进画面。
+- 导出走 **WebCodecs 离线编码**,比实时录制快很多;浏览器不支持时自动回退为实时录制。
+- MP4 导出依赖浏览器编码器支持,不支持时自动回退 WebM。
+- 自动运镜目前按「点击」自动生成,暂不支持逐帧手动加关键帧(下一版计划)。
+- `chrome://`、应用商店等特殊页面无法录制(浏览器限制)。
+
+## 技术结构
+
+```
+manifest.json          MV3 配置
+background.js           编排:取流 → 拉起 offscreen → 注入隐形追踪器 → 停止合并轨迹 → 存库
+offscreen.html/js       持有 MediaRecorder,录制 tabCapture 流(不设宽高上限以免黑边),音频回连保证可听见
+content/tracker.js      注入被录页的【隐形】光标/点击追踪器(不渲染 UI,不进画面)
+popup/                  一键起录 + 录制中控制(计时/暂停/停止)
+editor/render.js        渲染引擎:自动运镜 / 点击波纹 / aurora 背景(预览与导出共用)
+editor/editor.js        多段剪辑模型、胶片时间轴、实时预览、控制面板、撤销、录制库
+editor/exporter.js      WebCodecs 离线编码导出(MP4/WebM/GIF,可选尺寸),回退 MediaRecorder
+lib/presets.js          aurora 背景 + 默认皮肤预设
+lib/db.js               IndexedDB 存储(视频 blob + 光标轨迹)
+```

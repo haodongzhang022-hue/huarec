@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>HuaRec 编辑器</title>
+  <link rel="stylesheet" href="editor.css" />
+</head>
+<body>
+  <!-- 录制库 -->
+  <section id="libraryView" hidden>
+    <header class="topbar"><div class="brand"><img src="../icons/icon48.png" width="22" height="22" alt="" /> HuaRec <em>花录 · 录制库</em></div></header>
+    <div class="lib-wrap"><h2>最近的录制</h2><div id="recList" class="rec-list"></div><p id="recEmpty" class="empty" hidden>还没有录制。点击工具栏图标开始第一次录制。</p></div>
+  </section>
+
+  <!-- 编辑器 -->
+  <section id="editorView" hidden>
+    <header class="topbar">
+      <div class="brand"><img src="../icons/icon48.png" width="22" height="22" alt="" /> HuaRec <em>花录</em></div>
+      <div class="tb-right">
+        <button id="downloadRaw" class="btn-ghost" title="下载未加工的原始录像(不含美化)">↓ 源片</button>
+        <div class="seg small" id="sizeSeg" title="导出尺寸(越小文件越小)">
+          <button data-sz="orig" class="on">原尺寸</button>
+          <button data-sz="1080">1080p</button>
+          <button data-sz="720">720p</button>
+        </div>
+        <div class="seg" id="fmtSeg">
+          <button data-fmt="mp4" class="on">MP4</button>
+          <button data-fmt="webm">WebM</button>
+          <button data-fmt="gif">GIF</button>
+        </div>
+        <button id="export" class="btn-primary">导出</button>
+      </div>
+    </header>
+
+    <div class="editor-grid">
+      <div class="stage-col">
+        <div id="stage" class="stage">
+          <canvas id="canvas"></canvas>
+          <div id="exportMask" class="export-mask" hidden>
+            <div class="ring"></div>
+            <p id="exportLabel">正在导出…</p>
+            <div class="pbar"><div id="exportBar"></div></div>
+            <small>离线快速渲染,通常几秒完成</small>
+          </div>
+        </div>
+        <div class="transport">
+          <button id="play" class="play" aria-label="播放">▶</button>
+          <span id="curTime" class="t">0:00</span>
+          <div class="strip-wrap" id="stripWrap" title="拖出选区可删除/变速,单击定位,双击全选">
+            <div id="filmstrip" class="filmstrip"></div>
+            <div id="gaps" class="gaps"></div>
+            <div id="speedTags" class="speed-tags"></div>
+            <div id="selBand" class="sel-band" hidden></div>
+            <div id="playhead2" class="playhead2"></div>
+          </div>
+          <span id="durTime" class="t">0:00</span>
+        </div>
+        <div class="sel-bar" id="selBar" hidden>
+          <span class="sel-info" id="selInfo"></span>
+          <button class="sel-btn danger" id="selDelete">删除这段</button>
+          <span class="sel-lbl">这段变速</span>
+          <div class="seg small" id="selSpeedSeg">
+            <button data-sp="1">1×</button>
+            <button data-sp="1.5">1.5×</button>
+            <button data-sp="2">2×</button>
+            <button data-sp="3">3×</button>
+          </div>
+          <button class="sel-btn ghost" id="selClear">取消选择</button>
+        </div>
+      </div>
+
+      <aside class="panel">
+        <div class="master-seg">
+          <div class="seg accent" id="beautifySeg">
+            <button data-b="0">原始</button>
+            <button data-b="1" class="on">美化</button>
+          </div>
+        </div>
+
+        <div class="group beautify-only" id="gScene">
+          <div class="ghead"><span class="gtitle">画面</span></div>
+          <div id="bgChips" class="chips bg"></div>
+          <label class="row"><span>留白</span><input id="padding" type="range" min="0" max="18" /><span class="val" id="vPad"></span></label>
+          <label class="row"><span>圆角</span><input id="radius" type="range" min="0" max="40" /><span class="val" id="vRad"></span></label>
+          <label class="row"><span>阴影</span><input id="shadow" type="range" min="0" max="100" /><span class="val" id="vSha"></span></label>
+          <p class="gdesc">留白调到 0 时,视频铺满、背景不可见(等于关掉背景)。</p>
+        </div>
+
+        <div class="group beautify-only" id="gMotion">
+          <div class="ghead"><span class="gtitle">运镜与光标</span></div>
+          <label class="sw"><span class="lbl">跟随点击自动放大<span class="sub">点击处平滑推近,像 Screen Studio</span></span><input type="checkbox" id="autoZoom" /><span class="track-sw"></span></label>
+          <label class="row"><span>倍数</span><input id="zoomLevel" type="range" min="100" max="250" /><span class="val" id="vZoom"></span></label>
+          <label class="sw"><span class="lbl">点击波纹<span class="sub">点击处珊瑚色扩散环</span></span><input type="checkbox" id="clickFx" /><span class="track-sw"></span></label>
+          <label class="sw"><span class="lbl">补画光标<span class="sub">录像里没有鼠标时,叠一个干净光标</span></span><input type="checkbox" id="cursorOn" /><span class="track-sw"></span></label>
+          <p class="gdesc" id="trackInfo"></p>
+        </div>
+
+        <div class="group" id="gTrim">
+          <div class="ghead"><span class="gtitle">剪辑</span></div>
+          <p class="gdesc">在下方胶片轨道上拖出选区,删掉中间废片段或给它变速;删头尾也一样,选中再删。</p>
+          <div class="kbd-hints">
+            <span><b>空格</b> 播放 / 暂停</span>
+            <span><b>← →</b> 逐帧(按住 Shift 跳 1 秒)</span>
+            <span><b>I / O</b> 把选区起点 / 终点设到当前帧</span>
+            <span><b>Del</b> 删除选区 · <b>滚轮</b> 缩放时间轴(长录像精剪)</span>
+          </div>
+          <div class="minrow"><div class="btn-mini" id="resetEdits">重置剪辑</div></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <script type="module" src="editor.js"></script>
+</body>
+</html>

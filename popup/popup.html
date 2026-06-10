@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="brand">
+        <img src="../icons/icon48.png" alt="" width="22" height="22" />
+        <span>HuaRec <em>花录</em></span>
+      </div>
+      <button id="library" class="ghost" title="录制库">最近</button>
+    </header>
+
+    <!-- 待机视图:一键起录,不在录前做任何选择(皮肤/美化都在编辑器里调) -->
+    <section id="idle">
+      <button id="start" class="start">
+        <span class="ring"></span>
+        开始录制
+      </button>
+
+      <label class="toggle">
+        <input type="checkbox" id="audio" checked />
+        <span>录制标签页声音</span>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="cursor" checked />
+        <span>美化录制光标</span>
+      </label>
+
+      <p class="hint">点上方按钮或按 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> 起录<br/>美化、皮肤、运镜都在录完后的编辑器里调</p>
+    </section>
+
+    <!-- 录制中视图:计时 + 暂停 + 停止,全部留在工具栏弹窗里 -->
+    <section id="live" hidden>
+      <div class="live-head">
+        <span class="livedot" id="livedot"></span>
+        <span class="live-time" id="liveTime">0:00</span>
+        <span id="livetext" class="live-tag">录制中</span>
+      </div>
+      <div class="live-actions">
+        <button id="pause" class="ctl">暂停</button>
+        <button id="stop" class="stop">停止并编辑</button>
+      </div>
+      <button id="stopDl" class="ghost-line">停止 · 直接下载源片(不修)</button>
+      <p class="hint">关掉这个弹窗不会停止录制 · 按 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> 可随时停</p>
+    </section>
+
+    <p id="error" class="error" hidden></p>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
