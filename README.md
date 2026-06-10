@@ -7,14 +7,14 @@
 | 项 | 内容 |
 |---|---|
 | 名称 | HuaRec 花录 · 电影感网页录屏 |
-| 版本 | 0.2.0 |
+| 版本 | 0.3.0 |
 | 类型 | Chrome 扩展(Manifest V3) |
 | 运行环境 | Chrome / Edge 等 Chromium 内核浏览器,支持 `chrome.tabCapture` 与 `offscreen` |
 | 录制范围 | 当前标签页(http/https) |
 | 数据存储 | 全本地,IndexedDB 存视频与光标轨迹,不登录、不上传 |
 | 导出格式 | MP4 / WebM / GIF(WebCodecs 离线编码,不支持时回退 MediaRecorder) |
 | 快捷键 | `Alt+Shift+R` 开始 / 停止 |
-| 权限 | `tabCapture` / `offscreen` / `storage` / `scripting` / `activeTab` / `alarms` |
+| 权限 | `tabCapture` / `offscreen` / `storage` / `scripting` / `activeTab` / `alarms` + `http/https` host 权限(录制中跨页面导航时,自动重新注入光标追踪器需要) |
 | 技术栈 | 原生 JS(ES Module)+ Canvas 2D + WebCodecs + IndexedDB,无构建步骤、无第三方框架 |
 
 ## 它和别人不一样的地方
@@ -33,7 +33,7 @@
 ## 使用
 
 1. 在任意普通网页(http/https)上点 HuaRec 图标 → 点「开始录制」(或直接按 `Alt+Shift+R`)
-2. 弹窗自动关闭,正常操作网页;录制全程画面干净,**不会有任何控制条被录进去**
+2. 弹窗自动关闭,正常操作网页;录制全程画面干净,**不会有任何控制条被录进去**;中途点链接跳转、刷新页面都没关系,光标/点击追踪会自动接续
 3. 要暂停 / 停止时:再点一次工具栏的 HuaRec 图标 → 弹窗里有计时、暂停、「停止并编辑」(或「停止·直接下载源片」跳过编辑器),也可直接按 `Alt+Shift+R` 停止
 4. 停止后自动打开编辑器(默认进「美化」)
 5. 编辑器里实时调:背景(macOS 风)/ 留白 / 圆角 / 阴影 / 自动运镜倍数 / 点击波纹;在胶片轨道上拖选区删片段或变速
@@ -49,7 +49,8 @@
 - 变速段的音频用 WSOLA 时间拉伸,**变速不变调**(无花栗鼠声)。
 - 录制控制(计时/暂停/停止)在工具栏弹窗里,不在网页上——任何浮在网页上看得见的东西都会被 `tabCapture` 录进画面。
 - 导出走 **WebCodecs 离线编码**,比实时录制快很多;浏览器不支持时自动回退为实时录制。
-- MP4 导出依赖浏览器编码器支持,不支持时自动回退 WebM。
+- MP4 导出依赖浏览器编码器支持,不支持时自动回退 WebM;MP4 音轨优先 **AAC**(QuickTime / iOS / 微信 / 剪映都能播),系统不支持 AAC 编码时退回 Opus。
+- 源片 WebM 在存库前自动补写时长元数据,播放器里能正常显示时长、拖进度条。
 - 自动运镜目前按「点击」自动生成,暂不支持逐帧手动加关键帧(下一版计划)。
 - `chrome://`、应用商店等特殊页面无法录制(浏览器限制)。
 
@@ -59,7 +60,8 @@
 manifest.json          MV3 配置
 background.js           编排:取流 → 拉起 offscreen → 注入隐形追踪器 → 停止合并轨迹 → 存库
 offscreen.html/js       持有 MediaRecorder,录制 tabCapture 流(不设宽高上限以免黑边),音频回连保证可听见
-content/tracker.js      注入被录页的【隐形】光标/点击追踪器(不渲染 UI,不进画面)
+content/tracker.js      注入被录页的【隐形】光标/点击追踪器(不渲染 UI,不进画面);轨迹每 4s 增量上报 background,跨页面导航自动重注入接续
+lib/vendor/fix-webm-duration.mjs  MIT 三方库:给 MediaRecorder 产出的 WebM 补写 Duration 元数据
 popup/                  一键起录 + 录制中控制(计时/暂停/停止)
 editor/render.js        渲染引擎:自动运镜 / 点击波纹 / aurora 背景(预览与导出共用)
 editor/editor.js        多段剪辑模型、胶片时间轴、实时预览、控制面板、撤销、录制库

@@ -1,5 +1,7 @@
 // 注入被录制标签页的【隐形】光标/点击追踪器。不渲染任何可见 UI,
 // 所以不会被 tabCapture 录进画面。控制(计时/暂停/停止)在工具栏弹窗(popup)里。
+// 轨迹不在页面里攒到最后:每 4 秒增量 flush 给 background(页面卸载前再 flush 一次),
+// 这样录制中途跳转/刷新页面,已采的轨迹不丢;background 在新页面加载完会重新注入本脚本。
 (function () {
   if (window.__huarecTracker) return;
   window.__huarecTracker = true;
@@ -24,6 +26,23 @@
   }
   window.addEventListener('mousemove', onMove, { capture: true, passive: true });
   window.addEventListener('mousedown', onDown, { capture: true, passive: true });
+
+  // —— 增量上报:把已采轨迹交给 background 后清空本地,数据所有权在 background ——
+  let flushTimer = null;
+  function flush() {
+    if (!state.cursor.length && !state.clicks.length) return;
+    const delta = { type: 'TRACK_FLUSH', cursor: state.cursor, clicks: state.clicks };
+    state.cursor = []; state.clicks = [];
+    try { chrome.runtime.sendMessage(delta).catch(() => {}); } catch (_) {}
+  }
+  function startFlushTimer() {
+    if (!flushTimer) flushTimer = setInterval(flush, 4000);
+  }
+  function stopFlushTimer() {
+    if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
+  }
+  // 页面即将卸载(跳转/刷新/关闭)→ 最后一次 flush,别等定时器
+  window.addEventListener('pagehide', flush);
 
   // —— 路径B:录制时把页面默认光标换成一个干净的 macOS 风箭头 ——
   // 原理:CSS cursor 改的是「同一个」光标(你看到的=被录进去的),所以画面里只有一个、更好看的光标,
@@ -50,12 +69,19 @@
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || !msg.type) return;
     switch (msg.type) {
-      case 'REC_START':
-        state.active = true; state.paused = false;
+      case 'REC_START': {
+        // 导航后重注入会再收到一次 REC_START(带同一个 startTime):只同步状态,不清未上报数据
+        const sameSession = state.active && state.startTime === (msg.startTime || 0);
+        state.active = true;
         state.startTime = msg.startTime || Date.now();
-        state.pausedTotal = 0; state.cursor = []; state.clicks = [];
+        state.pausedTotal = msg.pausedTotal || 0;
+        state.paused = !!msg.paused;
+        state.pauseStart = state.paused ? (msg.pausedAt || Date.now()) : 0;
+        if (!sameSession) { state.cursor = []; state.clicks = []; }
         if (msg.enhanceCursor) enhanceCursor(); else restoreCursor();
+        startFlushTimer();
         break;
+      }
       case 'REC_PAUSE':
         state.paused = true; state.pauseStart = Date.now();
         break;
@@ -63,11 +89,15 @@
         if (state.pauseStart) state.pausedTotal += Date.now() - state.pauseStart;
         state.paused = false; state.pauseStart = 0;
         break;
-      case 'REQUEST_TRACK':
-        sendResponse({ cursor: state.cursor, clicks: state.clicks });
+      case 'REQUEST_TRACK': {
+        // 停止时 background 来收尾:交出最后一段未上报的增量(全量轨迹由 background 合并)
+        const delta = { cursor: state.cursor, clicks: state.clicks };
+        state.cursor = []; state.clicks = [];
+        sendResponse(delta);
         return true;
+      }
       case 'REC_TEARDOWN':
-        state.active = false; restoreCursor();
+        state.active = false; stopFlushTimer(); restoreCursor();
         break;
     }
   });

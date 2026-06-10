@@ -6,10 +6,26 @@ import { GIFEncoder, quantize, applyPalette } from '../lib/vendor/gifenc.mjs';
 
 const hasWebCodecs = typeof VideoEncoder !== 'undefined' && typeof VideoFrame !== 'undefined';
 
+// H.264 level 按分辨率/帧率动态算:写死 Level 4.0(上限约 2048×1024@30)会让 Retina
+// 全分辨率(2880×1800)在严格实现下直接「无可用编码器」,掉进慢速实时回退。
+function avcLevelHex(width, height, fps) {
+  const mb = Math.ceil(width / 16) * Math.ceil(height / 16); // 每帧宏块数
+  const levels = [
+    { idc: 0x28, fs: 8192, rate: 245760 },   // 4.0
+    { idc: 0x2a, fs: 8704, rate: 522240 },   // 4.2
+    { idc: 0x32, fs: 22080, rate: 589824 },  // 5.0
+    { idc: 0x33, fs: 36864, rate: 983040 },  // 5.1
+    { idc: 0x34, fs: 36864, rate: 2073600 }, // 5.2
+  ];
+  const l = levels.find((x) => mb <= x.fs && mb * fps <= x.rate) || levels[levels.length - 1];
+  return l.idc.toString(16).toUpperCase().padStart(2, '0');
+}
+
 async function pickVideoCodec(format, width, height, fps) {
+  const lv = avcLevelHex(width, height, fps);
   const candidates = format === 'mp4'
-    ? [{ codec: 'avc1.640028', muxer: 'avc' }, { codec: 'avc1.42E01E', muxer: 'avc' }]
-    : [{ codec: 'vp09.00.10.08', muxer: 'V_VP9' }, { codec: 'vp8', muxer: 'V_VP8' }];
+    ? [{ codec: `avc1.6400${lv}`, muxer: 'avc' }, { codec: `avc1.42E0${lv}`, muxer: 'avc' }, { codec: 'avc1.640028', muxer: 'avc' }]
+    : [{ codec: 'vp09.00.10.08', muxer: 'V_VP9' }, { codec: 'vp09.00.50.08', muxer: 'V_VP9' }, { codec: 'vp8', muxer: 'V_VP8' }];
   for (const c of candidates) {
     try {
       const s = await VideoEncoder.isConfigSupported({ codec: c.codec, width, height, framerate: fps });
@@ -34,13 +50,28 @@ async function exportWebCodecs({ canvas, drawAt, durationMs, fps, format, audio,
   const vc = await pickVideoCodec(format, width, height, fps);
   if (!vc) throw new Error('无可用视频编码器');
 
+  // MP4 音轨优先 AAC:QuickTime / iOS / 微信 / 剪映普遍不认「MP4 + Opus」,导出后无声。
+  // Chrome 在 mac / win 上有系统 AAC 编码器;探测不支持时才退回 Opus。WebM 维持 Opus。
+  let audioCodec = null;
+  if (audio) {
+    if (format === 'mp4') {
+      try {
+        const s = await AudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate: audio.sampleRate, numberOfChannels: audio.channels.length, bitrate: 128000 });
+        if (s && s.supported) audioCodec = { enc: 'mp4a.40.2', mux: 'aac' };
+      } catch (_) {}
+      if (!audioCodec) audioCodec = { enc: 'opus', mux: 'opus' };
+    } else {
+      audioCodec = { enc: 'opus', mux: 'A_OPUS' };
+    }
+  }
+
   const target = format === 'mp4' ? new Mp4Target() : new WebmTarget();
   const muxerOpts = {
     target,
     video: { codec: vc.muxer, width, height, frameRate: fps },
     firstTimestampBehavior: 'offset',
   };
-  if (audio) muxerOpts.audio = { codec: format === 'mp4' ? 'opus' : 'A_OPUS', numberOfChannels: audio.channels.length, sampleRate: audio.sampleRate };
+  if (audio) muxerOpts.audio = { codec: audioCodec.mux, numberOfChannels: audio.channels.length, sampleRate: audio.sampleRate };
   if (format === 'mp4') muxerOpts.fastStart = 'in-memory';
   const muxer = format === 'mp4' ? new Mp4Muxer(muxerOpts) : new WebmMuxer(muxerOpts);
 
@@ -66,9 +97,9 @@ async function exportWebCodecs({ canvas, drawAt, durationMs, fps, format, audio,
   await venc.flush();
   venc.close();
 
-  // 音频编码(Opus)
+  // 音频编码(AAC 或 Opus,见上面的探测)
   if (audio) {
-    await encodeAudio(audio, format, muxer, onProgress);
+    await encodeAudio(audio, audioCodec.enc, muxer, onProgress);
   }
 
   muxer.finalize();
@@ -77,14 +108,14 @@ async function exportWebCodecs({ canvas, drawAt, durationMs, fps, format, audio,
   return new Blob([target.buffer], { type: mime });
 }
 
-async function encodeAudio(audio, format, muxer, onProgress) {
+async function encodeAudio(audio, codec, muxer, onProgress) {
   const { channels, sampleRate } = audio;
   const numCh = channels.length;
   const aenc = new AudioEncoder({
     output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
     error: (e) => console.error('aenc', e),
   });
-  aenc.configure({ codec: 'opus', sampleRate, numberOfChannels: numCh, bitrate: 128000 });
+  aenc.configure({ codec, sampleRate, numberOfChannels: numCh, bitrate: 128000 });
 
   const totalSamples = channels[0].length;
   const chunkSamples = 48000; // 1s 块

@@ -1,5 +1,6 @@
 // offscreen 录制文档:持有 MediaRecorder,录制 tabCapture 流。
 import { saveRecording } from './lib/db.js';
+import { fixWebmDuration } from './lib/vendor/fix-webm-duration.mjs';
 
 let recorder = null;
 let chunks = [];
@@ -84,10 +85,13 @@ async function start(streamId, options) {
 }
 
 async function onStop() {
-  const blob = new Blob(chunks, { type: 'video/webm' });
+  let blob = new Blob(chunks, { type: 'video/webm' });
   const id = 'rec_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
   if (pausedAt) { pausedTotal += Date.now() - pausedAt; pausedAt = 0; }
   meta.durationMs = Date.now() - startTime - pausedTotal;
+  // MediaRecorder 的 WebM 没有 Duration 元数据 → 播放器拖不动进度条,编辑器要 seek 到末尾探测时长。
+  // 存库前补写;失败就保留原 blob(老行为),不阻塞保存。
+  try { blob = await fixWebmDuration(blob, meta.durationMs, { logger: false }); } catch (_) {}
   try {
     await saveRecording({ id, blob, cursor: [], clicks: [], meta });
     reply('OFFSCREEN_STOPPED', { id, meta });

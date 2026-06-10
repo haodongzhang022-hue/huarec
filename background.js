@@ -20,6 +20,32 @@ async function clearState() {
   await chrome.storage.session.set({ recState: { status: 'idle' } });
 }
 
+// ---- 轨迹缓冲(storage.session,抗 SW 休眠) ----
+// tracker 每 4 秒增量上报一次,这里合并暂存;录制跨页面导航时数据不再依赖页面存活。
+// 写操作串成 promise 链,避免「读-改-写」并发交错丢增量。
+let trackWrite = Promise.resolve();
+function appendTrack(delta) {
+  trackWrite = trackWrite.then(async () => {
+    const { trackBuf } = await chrome.storage.session.get('trackBuf');
+    const buf = trackBuf || { cursor: [], clicks: [] };
+    if (delta.cursor?.length) buf.cursor.push(...delta.cursor);
+    if (delta.clicks?.length) buf.clicks.push(...delta.clicks);
+    await chrome.storage.session.set({ trackBuf: buf });
+  }).catch((e) => console.warn('轨迹暂存失败:', e.message));
+  return trackWrite;
+}
+async function takeTrack() {
+  await trackWrite; // 等在途的增量写完
+  const { trackBuf } = await chrome.storage.session.get('trackBuf');
+  const buf = trackBuf || { cursor: [], clicks: [] };
+  buf.cursor.sort((a, b) => a.t - b.t);
+  buf.clicks.sort((a, b) => a.t - b.t);
+  return buf;
+}
+async function clearTrack() {
+  await chrome.storage.session.remove('trackBuf');
+}
+
 // ---- offscreen 文档管理 ----
 async function ensureOffscreen() {
   const has = await chrome.offscreen.hasDocument();
@@ -123,6 +149,7 @@ async function startRecording(options = {}) {
   }
 
   await ensureOffscreen();
+  await clearTrack();
   await setState({ status: 'starting', tabId: tab.id, options });
 
   // 启动 offscreen 录制,拿到真实起始时间
@@ -188,14 +215,15 @@ async function stopRecording(opts = {}) {
   if (st.status !== 'recording' && st.status !== 'paused') return { ok: false };
   await setState({ status: 'saving' });
 
-  // 向控制条要光标轨迹(同时让它显示"保存中")
-  let track = { cursor: [], clicks: [] };
+  // 向追踪器收最后一段未上报的增量,再取 background 侧合并好的全量轨迹。
+  // 页面若已导航/关闭(sendMessage 失败),已上报的部分仍然都在 trackBuf 里。
   if (st.tabId) {
     try {
       const resp = await chrome.tabs.sendMessage(st.tabId, { type: 'REQUEST_TRACK' });
-      if (resp) track = resp;
+      if (resp) await appendTrack(resp);
     } catch (_) {}
   }
+  const track = await takeTrack();
 
   // 停止 offscreen,拿到已存库的 id
   let stopped;
@@ -234,6 +262,7 @@ async function teardown(tabId) {
   if (tabId) chrome.tabs.sendMessage(tabId, { type: 'REC_TEARDOWN' }).catch(() => {});
   await closeOffscreen();
   await clearState();
+  await clearTrack();
   chrome.alarms.clear('huarec-keepalive').catch(() => {});
   chrome.action.setBadgeText({ text: '' });
 }
@@ -267,6 +296,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case 'GET_STATE':
       getState().then(sendResponse);
       return true;
+    case 'TRACK_FLUSH':
+      // 只收被录标签页的增量(防其他页面残留的旧 tracker 串数据)
+      getState().then((st) => {
+        if (sender.tab && sender.tab.id === st.tabId && st.status !== 'idle') appendTrack(msg);
+      });
+      return false;
+  }
+});
+
+// 录制中跨页面导航:新页面加载完成 → 重新注入追踪器并恢复会话(原 startTime / 暂停状态),
+// 光标美化也一并恢复。之前导航会让追踪器连同轨迹一起消失,运镜与波纹从那一刻起全部失效。
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (info.status !== 'complete') return;
+  const st = await getState();
+  if ((st.status !== 'recording' && st.status !== 'paused') || tabId !== st.tabId) return;
+  if (!canCapture(tab.url)) return;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content/tracker.js'] });
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'REC_START',
+      startTime: st.startTime,
+      pausedTotal: st.pausedTotal || 0,
+      paused: st.status === 'paused',
+      pausedAt: st.pausedAt || 0,
+      enhanceCursor: st.options?.enhanceCursor !== false,
+    });
+  } catch (e) {
+    console.warn('导航后重注入追踪器失败:', e.message);
   }
 });
 
