@@ -33,8 +33,13 @@
         <input type="checkbox" id="camera" />
         <span>同时录制摄像头</span>
       </label>
+      <label class="toggle">
+        <input type="checkbox" id="mic" />
+        <span>录制麦克风旁白</span>
+      </label>
       <video id="camPreview" autoplay muted playsinline hidden></video>
       <p class="cam-hint" id="camHint" hidden>位置 / 大小 / 样式 / 美颜,录完后在编辑器里调</p>
+      <p class="cam-hint" id="micHint" hidden>旁白单独成轨,音量录完再调 · 外放时建议戴耳机防回声</p>
 
       <p class="hint">点上方按钮或按 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> 起录<br/>美化、皮肤、运镜都在录完后的编辑器里调</p>
     </section>

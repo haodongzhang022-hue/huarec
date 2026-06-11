@@ -275,9 +275,9 @@ async function teardown(tabId) {
 async function toggle() {
   const st = await getState();
   if (st.status === 'idle') {
-    // 沿用 popup 里的音频/光标/摄像头偏好,保证快捷键起录与点按钮一致(音频/光标默认开,摄像头默认关)
-    const { lastAudio, lastCursor, lastCamera } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera']);
-    await startRecording({ audio: lastAudio !== false, enhanceCursor: lastCursor !== false, camera: lastCamera === true });
+    // 沿用 popup 里的偏好,保证快捷键起录与点按钮一致(音频/光标默认开,摄像头/麦克风默认关)
+    const { lastAudio, lastCursor, lastCamera, lastMic } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera', 'lastMic']);
+    await startRecording({ audio: lastAudio !== false, enhanceCursor: lastCursor !== false, camera: lastCamera === true, mic: lastMic === true });
   } else await stopRecording();
 }
 

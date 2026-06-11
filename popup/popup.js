@@ -32,18 +32,44 @@ async function setCamPreview(on, interactive) {
   }
 }
 
+// 麦克风开关:勾选时做一次权限探测(立刻放掉设备,真正占用在录制开始后)
+async function checkMic(interactive) {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    s.getTracks().forEach((t) => t.stop());
+    return true;
+  } catch (e) {
+    if (!interactive) return false;
+    if (e.name === 'NotAllowedError') {
+      chrome.tabs.create({ url: chrome.runtime.getURL('permission.html') });
+      window.close();
+    } else {
+      const err = $('error');
+      err.hidden = false;
+      err.textContent = '无法访问麦克风:' + (e.name === 'NotFoundError' ? '没有检测到麦克风设备' : e.message);
+    }
+    return false;
+  }
+}
+
 async function init() {
-  const { lastAudio, lastCursor, lastCamera } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera']);
+  const { lastAudio, lastCursor, lastCamera, lastMic } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera', 'lastMic']);
   if (lastAudio === false) $('audio').checked = false;
   if (lastCursor === false) $('cursor').checked = false;
   if (lastCamera === true) {
     $('camera').checked = true;
     setCamPreview(true, false).then((ok) => { if (!ok) $('camera').checked = false; });
   }
+  if (lastMic === true) { $('mic').checked = true; $('micHint').hidden = false; }
   $('camera').addEventListener('change', async (e) => {
     const ok = await setCamPreview(e.target.checked, true);
     if (!ok) e.target.checked = false;
     chrome.storage.local.set({ lastCamera: $('camera').checked });
+  });
+  $('mic').addEventListener('change', async (e) => {
+    if (e.target.checked && !(await checkMic(true))) e.target.checked = false;
+    $('micHint').hidden = !e.target.checked;
+    chrome.storage.local.set({ lastMic: $('mic').checked });
   });
 
   const st = await chrome.runtime.sendMessage({ type: 'GET_STATE' }).catch(() => ({ status: 'idle' }));
@@ -102,10 +128,11 @@ async function start() {
   const audio = $('audio').checked;
   const enhanceCursor = $('cursor').checked;
   const camera = $('camera').checked;
-  chrome.storage.local.set({ lastAudio: audio, lastCursor: enhanceCursor, lastCamera: camera });
+  const mic = $('mic').checked;
+  chrome.storage.local.set({ lastAudio: audio, lastCursor: enhanceCursor, lastCamera: camera, lastMic: mic });
   // 先放掉弹窗占用的摄像头,offscreen 才能稳拿同一台设备
   await setCamPreview(false);
-  const res = await chrome.runtime.sendMessage({ type: 'START_RECORDING', options: { audio, enhanceCursor, camera } });
+  const res = await chrome.runtime.sendMessage({ type: 'START_RECORDING', options: { audio, enhanceCursor, camera, mic } });
   if (res && res.ok) {
     window.close();
   } else {

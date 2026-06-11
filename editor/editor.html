@@ -122,6 +122,13 @@
           <label class="sw"><span class="lbl">白色描边</span><input type="checkbox" id="camRing" /><span class="track-sw"></span></label>
         </div>
 
+        <div class="group" id="gAudio" hidden>
+          <div class="ghead"><span class="gtitle">声音</span></div>
+          <label class="row" id="rowTabVol" hidden><span>网页</span><input id="tabVol" type="range" min="0" max="150" /><span class="val" id="vTabVol"></span></label>
+          <label class="row" id="rowMicVol" hidden><span>麦克风</span><input id="micVol" type="range" min="0" max="150" /><span class="val" id="vMicVol"></span></label>
+          <p class="gdesc">两轨分开调,导出按这里混音。预览增益最高 100,超出部分导出时生效。</p>
+        </div>
+
         <div class="group" id="gTrim">
           <div class="ghead"><span class="gtitle">剪辑</span></div>
           <div class="trim-auto">

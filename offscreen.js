@@ -16,21 +16,26 @@ let camRecorder = null;
 let camStream = null;
 let camStartTime = 0;
 let camStopped = null; // camRecorder 完全停止(最后一片已派发)的 promise
+// 麦克风轨:旁白单独录一条 opus,编辑器里和网页声音分轨调音量再混
+let micRecorder = null;
+let micStream = null;
+let micStartTime = 0;
+let micStopped = null;
 
 // ---- 切片流式写入 ----
 // 写操作串成 promise 链:保证 seq 顺序落库,停止时 await 链尾即可确认全部写完。
 let session = '';
-let seqScreen = 0, seqCam = 0;
+const seqs = { screen: 0, cam: 0, mic: 0 };
 let writeChain = Promise.resolve();
 function pushChunk(track, data) {
-  const seq = track === 'cam' ? ++seqCam : ++seqScreen;
+  const seq = ++seqs[track];
   writeChain = writeChain
     .then(() => appendChunk({ session, track, seq, data }))
     .catch((e) => console.warn('切片入库失败:', e.message));
 }
-// 会话行随录制进展更新(startTime/camStartTime/meta),崩溃恢复时凭它算时长与摄像头偏移
+// 会话行随录制进展更新(各轨起点/meta),崩溃恢复时凭它算时长与轨间偏移
 function updateSession() {
-  putSession({ session, createdAt: meta.createdAt || Date.now(), startTime, camStartTime, meta })
+  putSession({ session, createdAt: meta.createdAt || Date.now(), startTime, camStartTime, micStartTime, meta })
     .catch((e) => console.warn('会话登记失败:', e.message));
 }
 
@@ -52,8 +57,8 @@ function pickMime() {
 
 async function start(streamId, options) {
   session = 'sess_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
-  seqScreen = 0; seqCam = 0; writeChain = Promise.resolve();
-  startTime = 0; camStartTime = 0;
+  seqs.screen = 0; seqs.cam = 0; seqs.mic = 0; writeChain = Promise.resolve();
+  startTime = 0; camStartTime = 0; micStartTime = 0;
   // 黑边根治:tabCapture 的捕获帧若用默认比例,会把比例不同的网页 letterbox(黑边烤进像素)。
   // 这里用 background 测得的【视口真实设备像素】把捕获盒子锁成和网页一模一样的比例和尺寸 →
   // 内容刚好填满捕获帧,不留黑边。拿不到视口尺寸时退回只限帧率(不强加任何固定比例)。
@@ -115,6 +120,26 @@ async function start(streamId, options) {
     }
   }
 
+  // 麦克风轨:开浏览器自带的回声消除/降噪/自动增益;失败同样只降级,不连坐
+  micRecorder = null; micStream = null; micStopped = null;
+  if (options.mic) {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      });
+      micRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 128000 });
+      micRecorder.ondataavailable = (e) => { if (e.data && e.data.size) pushChunk('mic', e.data); };
+      micRecorder.onstart = () => { micStartTime = Date.now(); updateSession(); };
+      micStopped = new Promise((res) => { micRecorder.onstop = res; });
+      micRecorder.start(1000);
+    } catch (e) {
+      console.warn('麦克风获取失败,本段无旁白:', e.message);
+      if (micStream) micStream.getTracks().forEach((t) => t.stop());
+      micStream = null; micRecorder = null; micStopped = null;
+    }
+  }
+
   const mimeType = pickMime();
   // 码率随分辨率自适应:普通屏保持 8Mbps,Retina(2880×1800 等)按 0.12 bit/px/帧 拉高到上限 24M,
   // 否则高分辨率下 8M 会让滚动/弹窗等运动场景糊掉(0.051 bit/px/帧 远低于 VP9 推荐)。
@@ -138,15 +163,21 @@ async function onStop() {
   const stopAt = Date.now();
   if (pausedAt) { pausedTotal += stopAt - pausedAt; pausedAt = 0; }
   meta.durationMs = stopAt - startTime - pausedTotal;
-  // 摄像头轨收尾:stop() 会先派发最后一片再触发 onstop,等它停稳切片才齐
+  // 摄像头/麦克风轨收尾:stop() 会先派发最后一片再触发 onstop,等停稳切片才齐
   if (camRecorder) {
     try {
       if (camRecorder.state !== 'inactive') camRecorder.stop();
       await camStopped;
     } catch (e) { console.warn('摄像头轨停止异常:', e.message); }
   }
+  if (micRecorder) {
+    try {
+      if (micRecorder.state !== 'inactive') micRecorder.stop();
+      await micStopped;
+    } catch (e) { console.warn('麦克风轨停止异常:', e.message); }
+  }
   await writeChain; // 全部切片落库完毕
-  let blob = null, camBlob = null;
+  let blob = null, camBlob = null, micBlob = null;
   try {
     const rows = await getSessionChunks(session);
     blob = new Blob(rows.filter((r) => r.track === 'screen').map((r) => r.data), { type: 'video/webm' });
@@ -155,6 +186,12 @@ async function onStop() {
       camBlob = new Blob(camParts, { type: 'video/webm' });
       meta.hasCam = true;
       meta.camOffsetMs = camStartTime - startTime;
+    }
+    const micParts = rows.filter((r) => r.track === 'mic').map((r) => r.data);
+    if (micParts.length) {
+      micBlob = new Blob(micParts, { type: 'audio/webm' });
+      meta.hasMic = true;
+      meta.micOffsetMs = micStartTime - startTime;
     }
   } catch (e) {
     reply('OFFSCREEN_STOPPED', { id: null, error: '读取录制切片失败:' + e.message });
@@ -169,7 +206,7 @@ async function onStop() {
     try { camBlob = await fixWebmDuration(camBlob, camDur, { logger: false }); } catch (_) {}
   }
   try {
-    await saveRecording({ id, blob, camBlob, cursor: [], clicks: [], meta });
+    await saveRecording({ id, blob, camBlob, micBlob, cursor: [], clicks: [], meta });
     await deleteSession(session).catch(() => {}); // 成品已落库,切片使命完成
     reply('OFFSCREEN_STOPPED', { id, meta });
   } catch (e) {
@@ -181,9 +218,11 @@ async function onStop() {
 function cleanup() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
   if (camStream) camStream.getTracks().forEach((t) => t.stop());
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
   if (audioCtx) audioCtx.close().catch(() => {});
   stream = null; audioCtx = null; recorder = null;
   camStream = null; camRecorder = null; camStopped = null;
+  micStream = null; micRecorder = null; micStopped = null;
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -197,11 +236,13 @@ chrome.runtime.onMessage.addListener((msg) => {
     case 'OFFSCREEN_PAUSE':
       if (recorder && recorder.state === 'recording') { recorder.pause(); pausedAt = Date.now(); }
       if (camRecorder && camRecorder.state === 'recording') camRecorder.pause();
+      if (micRecorder && micRecorder.state === 'recording') micRecorder.pause();
       reply('OFFSCREEN_PAUSED');
       break;
     case 'OFFSCREEN_RESUME':
       if (recorder && recorder.state === 'paused') { recorder.resume(); if (pausedAt) { pausedTotal += Date.now() - pausedAt; pausedAt = 0; } }
       if (camRecorder && camRecorder.state === 'paused') camRecorder.resume();
+      if (micRecorder && micRecorder.state === 'paused') micRecorder.resume();
       reply('OFFSCREEN_RESUMED');
       break;
     case 'OFFSCREEN_STOP':

@@ -30,6 +30,8 @@ let camVideo = null, camDur = 0, camOffset = 0; // 摄像头轨:独立 video 元
 let camCfg = null;                              // 气泡配置 {show,x,y,size,shape,beauty,mirror,ring}
 let savedCamPrefs = null;                       // 本段没有摄像头轨时,保住已存的摄像头偏好不被 savePrefs 覆盖
 let proj = null, projTimer = null;              // 本段录制的编辑工程(剪辑/美化/摄像头),防抖持久化,关页不丢
+let micBlob = null, micAudio = null, micOffset = 0; // 麦克风轨:独立 audio 元素同步预览,导出时混音
+let tabVol = 1, micVol = 1;                     // 混音音量(0~1.5);预览端 element.volume 只能到 1,超出部分导出生效
 
 const id = new URLSearchParams(location.search).get('id');
 if (id) loadEditor(id); else showLibrary();
@@ -107,14 +109,20 @@ async function recoverSession(s, el) {
     const blob = new Blob(screen, { type: 'video/webm' });
     const camParts = rows.filter((r) => r.track === 'cam').map((r) => r.data);
     const camBlob = camParts.length ? new Blob(camParts, { type: 'video/webm' }) : null;
-    // durationMs 未知(=0),编辑器打开时会自动探测;摄像头偏移凭会话行里记下的两个起点算
+    const micParts = rows.filter((r) => r.track === 'mic').map((r) => r.data);
+    const recMicBlob = micParts.length ? new Blob(micParts, { type: 'audio/webm' }) : null;
+    // durationMs 未知(=0),编辑器打开时会自动探测;各轨偏移凭会话行里记下的起点算
     const meta = { ...(s.meta || {}), createdAt: s.createdAt, durationMs: 0, recovered: true };
     if (camBlob) {
       meta.hasCam = true;
       meta.camOffsetMs = s.camStartTime && s.startTime ? s.camStartTime - s.startTime : 0;
     }
+    if (recMicBlob) {
+      meta.hasMic = true;
+      meta.micOffsetMs = s.micStartTime && s.startTime ? s.micStartTime - s.startTime : 0;
+    }
     const id = 'rec_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
-    await saveRecording({ id, blob, camBlob, cursor: [], clicks: [], acts: [], meta });
+    await saveRecording({ id, blob, camBlob, micBlob: recMicBlob, cursor: [], clicks: [], acts: [], meta });
     await deleteSession(s.session);
     location.search = `?id=${id}`;
   } catch (e) {
@@ -199,6 +207,16 @@ async function loadEditor(recId) {
     bindCamControls(); syncCamControls();
   }
 
+  // 麦克风轨:独立 audio 元素跟着预览走;音量两轨分调,导出时按增益混音
+  micBlob = rec.micBlob || null;
+  micOffset = recMeta.micOffsetMs || 0;
+  if (proj.audio) { tabVol = proj.audio.tabVol ?? 1; micVol = proj.audio.micVol ?? 1; }
+  if (micBlob) {
+    micAudio = new Audio(URL.createObjectURL(micBlob));
+    micAudio.preload = 'auto';
+  }
+  if (micBlob || recMeta.hasAudio) bindAudioControls();
+
   buildBgChips(); markBg(cfg.background.id);
   bindSegments(); bindControls(); bindTransport(); bindTimeline(); bindKeys();
   syncBeautifyUI();
@@ -230,6 +248,7 @@ function scheduleProjectSave() {
       clickFx: cfg.clickFx, cursor: cfg.cursor, autoZoom: cfg.autoZoom, zoomLevel: cfg.zoomLevel,
     };
     proj.camCfg = camCfg ? { ...camCfg } : null;
+    proj.audio = { tabVol, micVol };
     proj.savedAt = Date.now();
     saveProject(proj).catch((e) => console.warn('工程保存失败:', e.message));
   }, 800);
@@ -343,13 +362,18 @@ function render() {
   if (camVideo && camCfg) drawCamera(ctx, camVideo, camCfg, W, H);
 }
 
-// ---- 摄像头轨同步:摄像头时间 = 屏幕源时间 - 起点偏移 ----
+// ---- 摄像头/麦克风轨同步:轨内时间 = 屏幕源时间 - 起点偏移 ----
 function camTimeFor(srcMs) { return Math.max(0, Math.min(camDur - 30, srcMs - camOffset)) / 1000; }
 // 暂停态强制对齐;播放态只纠 >150ms 的漂移,避免每帧 seek 卡顿
 function syncCam(force = false) {
   if (!camVideo) return;
   const want = camTimeFor(video.currentTime * 1000);
   if (force || Math.abs(camVideo.currentTime - want) > 0.15) camVideo.currentTime = want;
+}
+function syncMic(force = false) {
+  if (!micAudio) return;
+  const want = Math.max(0, (video.currentTime * 1000 - micOffset) / 1000);
+  if (force || Math.abs(micAudio.currentTime - want) > 0.15) micAudio.currentTime = want;
 }
 
 function frame() {
@@ -374,14 +398,19 @@ function frame() {
         if (camVideo.playbackRate !== video.playbackRate) camVideo.playbackRate = video.playbackRate;
         syncCam();
       }
+      if (micAudio) {
+        if (micAudio.paused) micAudio.play().catch(() => {});
+        if (micAudio.playbackRate !== video.playbackRate) micAudio.playbackRate = video.playbackRate;
+        syncMic();
+      }
     }
   }
   render(); syncTimeline();
 }
 
-function finishPlayback() { playing = false; video.pause(); if (camVideo) camVideo.pause(); $('play').textContent = '▶'; }
-function pausePlayback() { if (playing) { playing = false; video.pause(); if (camVideo) camVideo.pause(); $('play').textContent = '▶'; } }
-function seekVideo(ms) { const t = Math.max(0, Math.min(videoDur - 30, ms)) / 1000; if (isFinite(t)) { video.currentTime = t; if (camVideo) camVideo.currentTime = camTimeFor(t * 1000); } }
+function finishPlayback() { playing = false; video.pause(); if (camVideo) camVideo.pause(); if (micAudio) micAudio.pause(); $('play').textContent = '▶'; }
+function pausePlayback() { if (playing) { playing = false; video.pause(); if (camVideo) camVideo.pause(); if (micAudio) micAudio.pause(); $('play').textContent = '▶'; } }
+function seekVideo(ms) { const t = Math.max(0, Math.min(videoDur - 30, ms)) / 1000; if (isFinite(t)) { video.currentTime = t; if (camVideo) camVideo.currentTime = camTimeFor(t * 1000); if (micAudio) syncMic(true); } }
 
 function syncTimeline() {
   const dur = videoDur || 1;
@@ -510,31 +539,36 @@ let idleThreshold = 3000;
 const IDLE_PAD = 400;       // 剪切边距:保住空白前后的最后一拍动作/话音尾
 const IDLE_MIN_CUT = 800;   // 剪出来不足 0.8s 的碎段不值得剪
 
-// 音频活动时间点:按 100ms 窗算 RMS,阈值取「底噪 ×3」与绝对下限的较大者(纯静音底噪≈0 → 不会把噪声当说话)
+// 音频活动时间点:按 100ms 窗算 RMS,阈值取「底噪 ×3」与绝对下限的较大者(纯静音底噪≈0 → 不会把噪声当说话)。
+// 网页声音和麦克风旁白都算「有内容」:正在说话的片段绝不能被「剪除空白」误伤。
 async function audioActiveTimes() {
-  if (!recMeta.hasAudio) return [];
+  if (!recMeta.hasAudio && !micBlob) return [];
+  const times = [];
   try {
-    const arr = await rawBlob.arrayBuffer();
     const ac = new (window.AudioContext || window.webkitAudioContext)();
-    const buf = await ac.decodeAudioData(arr);
+    const analyze = async (blob, offsetMs) => {
+      let buf;
+      try { buf = await ac.decodeAudioData(await blob.arrayBuffer()); } catch (_) { return; }
+      const ch = buf.getChannelData(0);
+      const sr = buf.sampleRate, win = Math.round(sr * 0.1);
+      const n = Math.floor(ch.length / win);
+      if (!n) return;
+      const rms = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        let s = 0; const o = i * win;
+        for (let j = 0; j < win; j += 4) s += ch[o + j] * ch[o + j];
+        rms[i] = Math.sqrt(s / (win / 4));
+      }
+      const sorted = Float32Array.from(rms).sort();
+      const floor = sorted[Math.floor(n * 0.2)];
+      const th = Math.max(0.01, floor * 3);
+      for (let i = 0; i < n; i++) if (rms[i] > th) times.push(i * 100 + 50 + offsetMs);
+    };
+    if (recMeta.hasAudio) await analyze(rawBlob, 0);
+    if (micBlob) await analyze(micBlob, micOffset);
     ac.close();
-    const ch = buf.getChannelData(0);
-    const sr = buf.sampleRate, win = Math.round(sr * 0.1);
-    const n = Math.floor(ch.length / win);
-    if (!n) return [];
-    const rms = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      let s = 0; const o = i * win;
-      for (let j = 0; j < win; j += 4) s += ch[o + j] * ch[o + j];
-      rms[i] = Math.sqrt(s / (win / 4));
-    }
-    const sorted = Float32Array.from(rms).sort();
-    const floor = sorted[Math.floor(n * 0.2)];
-    const th = Math.max(0.01, floor * 3);
-    const times = [];
-    for (let i = 0; i < n; i++) if (rms[i] > th) times.push(i * 100 + 50);
     return times;
-  } catch (e) { console.warn('音频活动分析失败,仅按操作轨迹判定:', e.message); return []; }
+  } catch (e) { console.warn('音频活动分析失败,仅按操作轨迹判定:', e.message); return times; }
 }
 
 // 在源时间轴上找空白区间,并与现存保留片段求交(已删掉的部分不重复计数)
@@ -744,6 +778,31 @@ function bindCamDrag() {
   });
 }
 
+// ---- 声音面板(两轨分调音量) ----
+function bindAudioControls() {
+  $('gAudio').hidden = false;
+  const wire = (rowId, sliderId, valId, get, set) => {
+    $(rowId).hidden = false;
+    const el = $(sliderId);
+    el.value = Math.round(get() * 100); $(valId).textContent = Math.round(get() * 100); paintRange(el);
+    el.addEventListener('input', (e) => {
+      paintRange(e.target);
+      set(+e.target.value / 100);
+      $(valId).textContent = e.target.value;
+      applyPreviewVolumes();
+      scheduleProjectSave();
+    });
+  };
+  if (recMeta.hasAudio) wire('rowTabVol', 'tabVol', 'vTabVol', () => tabVol, (v) => { tabVol = v; });
+  if (micAudio) wire('rowMicVol', 'micVol', 'vMicVol', () => micVol, (v) => { micVol = v; });
+  applyPreviewVolumes();
+}
+// 预览音量:媒体元素增益上限是 1,超过 100 的部分只在导出混音时生效
+function applyPreviewVolumes() {
+  video.volume = Math.min(1, tabVol);
+  if (micAudio) micAudio.volume = Math.min(1, micVol);
+}
+
 // ---- 导出 ----
 // WSOLA 时间拉伸:改变时长但【保持音高】(变速不变调,告别花栗鼠声)。
 // s = 输出/输入 长度比(2× 加速 → s=0.5)。靠互相关搜索对齐相邻帧,最小化相位断裂。
@@ -779,16 +838,44 @@ function timeStretch(x, s, sr) {
 }
 
 async function buildAudio() {
-  if (!recMeta.hasAudio) return null;
+  if (!recMeta.hasAudio && !micBlob) return null;
   try {
-    const arr = await rawBlob.arrayBuffer();
+    // 同一个 AudioContext 解码两轨 → 采样率天然一致,直接按样本相加混音
     const ac = new (window.AudioContext || window.webkitAudioContext)();
-    const buf = await ac.decodeAudioData(arr);
-    const sr = buf.sampleRate, numCh = buf.numberOfChannels;
-    // 逐保留片段:speed==1 原样拷贝;变速段走 WSOLA 时间拉伸(保音高)后拼接。
+    const decode = async (blob) => {
+      try { return await ac.decodeAudioData(await blob.arrayBuffer()); }
+      catch (e) { console.warn('音轨解码失败:', e.message); return null; }
+    };
+    const tabBuf = recMeta.hasAudio ? await decode(rawBlob) : null;
+    const micBuf = micBlob ? await decode(micBlob) : null;
+    ac.close();
+    if (!tabBuf && !micBuf) return null;
+
+    const sr = (tabBuf || micBuf).sampleRate;
+    const numCh = tabBuf ? tabBuf.numberOfChannels : 1;
+    const micShift = Math.round((micOffset / 1000) * sr);
+    // 第一步:把两轨按各自增益混到完整源时间轴上(麦克风按起点偏移对位)
+    const mixLen = Math.max(tabBuf ? tabBuf.length : 0, micBuf ? micShift + micBuf.length : 0);
+    const mixed = [];
+    for (let c = 0; c < numCh; c++) {
+      const out = new Float32Array(mixLen);
+      if (tabBuf) {
+        const src = tabBuf.getChannelData(Math.min(c, tabBuf.numberOfChannels - 1));
+        for (let i = 0; i < src.length; i++) out[i] = src[i] * tabVol;
+      }
+      if (micBuf) {
+        const src = micBuf.getChannelData(Math.min(c, micBuf.numberOfChannels - 1));
+        for (let i = 0; i < src.length; i++) {
+          const j = i + micShift;
+          if (j >= 0 && j < mixLen) out[j] += src[i] * micVol;
+        }
+      }
+      mixed.push(out);
+    }
+    // 第二步:逐保留片段切片;speed==1 原样拷贝,变速段走 WSOLA 时间拉伸(保音高)后拼接
     const channels = [];
     for (let c = 0; c < numCh; c++) {
-      const src = buf.getChannelData(c);
+      const src = mixed[c];
       const parts = [];
       for (const seg of segments) {
         const s0 = Math.max(0, Math.floor(seg.s / 1000 * sr));
@@ -801,7 +888,6 @@ async function buildAudio() {
       let off = 0; for (const pt of parts) { out.set(pt, off); off += pt.length; }
       channels.push(out);
     }
-    ac.close();
     return { channels, sampleRate: sr };
   } catch (e) { console.warn('音频处理失败,导出无声:', e.message); return null; }
 }
@@ -837,7 +923,7 @@ function camSeekTo(sec) {
 async function doExport() {
   if (exporting) return;
   recompute(); // 确保总时长是最新剪辑结果
-  exporting = true; playing = false; video.pause(); if (camVideo) camVideo.pause();
+  exporting = true; playing = false; video.pause(); if (camVideo) camVideo.pause(); if (micAudio) micAudio.pause();
   // 按所选尺寸决定导出分辨率(控制体积):原始 / 1080p / 720p,绝不放大
   const targetH = exportSize === '1080' ? 1080 : exportSize === '720' ? 720 : H;
   const sc = Math.min(1, targetH / H);
