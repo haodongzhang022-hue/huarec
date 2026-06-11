@@ -272,15 +272,19 @@ function scheduleProjectSave() {
   }, 800);
 }
 
-// 库列表封面:抓当前帧(刚打开时是第 0 帧)缩成小图存进工程行
+// 库列表封面:从渲染好的主画布抓(自带壁纸美化);延迟到首帧确定画上之后,
+// 直接抓 video 元素会在解码完成前拿到黑帧。
 function makePoster() {
-  try {
-    const pw = 320, ph = Math.max(2, Math.round(320 * H / W));
-    const pc = document.createElement('canvas'); pc.width = pw; pc.height = ph;
-    pc.getContext('2d').drawImage(video, 0, 0, pw, ph);
-    proj.poster = pc.toDataURL('image/jpeg', 0.7);
-    scheduleProjectSave();
-  } catch (_) {}
+  setTimeout(() => {
+    if (proj.poster || exporting) return;
+    try {
+      const pw = 320, ph = Math.max(2, Math.round(320 * H / W));
+      const pc = document.createElement('canvas'); pc.width = pw; pc.height = ph;
+      pc.getContext('2d').drawImage(canvas, 0, 0, pw, ph);
+      proj.poster = pc.toDataURL('image/jpeg', 0.7);
+      scheduleProjectSave();
+    } catch (_) {}
+  }, 1200);
 }
 
 // ---- 偏好持久化 ----
@@ -516,8 +520,15 @@ async function buildFilmstrip() {
 // ---- 播放控制 ----
 function bindTransport() {
   $('play').onclick = togglePlay;
-  $('export').onclick = doExport;
-  $('downloadRaw').onclick = () => download(rawBlob, 'webm');
+  $('toLibrary').onclick = () => { location.search = ''; };
+  // 导出浮层:比例/分辨率/格式收进来,顶栏只留一个主按钮
+  const menu = $('exportMenu');
+  $('exportMenuBtn').onclick = (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; };
+  menu.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', () => { menu.hidden = true; });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') menu.hidden = true; });
+  $('export').onclick = () => { menu.hidden = true; doExport(); };
+  $('downloadRaw').onclick = () => { menu.hidden = true; download(rawBlob, 'webm'); };
 }
 function togglePlay() {
   if (exporting) return;

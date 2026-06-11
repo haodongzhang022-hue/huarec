@@ -17,24 +17,39 @@
     <header class="topbar">
       <div class="brand"><img src="../icons/icon48.png" width="22" height="22" alt="" /> HuaRec <em>花录</em></div>
       <div class="tb-right">
-        <button id="downloadRaw" class="btn-ghost" title="下载未加工的原始录像(不含美化)">↓ 源片</button>
-        <div class="seg small" id="arSeg" title="画布比例:竖屏/方形适配小红书、视频号、抖音">
-          <button data-ar="orig" class="on">原始</button>
-          <button data-ar="9:16">9:16</button>
-          <button data-ar="1:1">1:1</button>
-          <button data-ar="4:5">4:5</button>
+        <button id="toLibrary" class="btn-ghost">录制库</button>
+        <div class="export-wrap">
+          <button id="exportMenuBtn" class="btn-primary">导出…</button>
+          <div id="exportMenu" class="export-menu" hidden>
+            <div class="em-row">
+              <span>画布比例</span>
+              <div class="seg small" id="arSeg" title="竖屏/方形适配小红书、视频号、抖音;选完看预览,所见即导出">
+                <button data-ar="orig" class="on">原始</button>
+                <button data-ar="9:16">9:16</button>
+                <button data-ar="1:1">1:1</button>
+                <button data-ar="4:5">4:5</button>
+              </div>
+            </div>
+            <div class="em-row">
+              <span>分辨率</span>
+              <div class="seg small" id="sizeSeg" title="越小文件越小">
+                <button data-sz="orig" class="on">原始</button>
+                <button data-sz="1080">1080p</button>
+                <button data-sz="720">720p</button>
+              </div>
+            </div>
+            <div class="em-row">
+              <span>格式</span>
+              <div class="seg small" id="fmtSeg">
+                <button data-fmt="mp4" class="on">MP4</button>
+                <button data-fmt="webm">WebM</button>
+                <button data-fmt="gif">GIF</button>
+              </div>
+            </div>
+            <button id="export" class="btn-primary em-go">开始导出</button>
+            <button id="downloadRaw" class="em-raw" title="未加工的原始录像,不含任何美化">只要源片(WebM,不加工)</button>
+          </div>
         </div>
-        <div class="seg small" id="sizeSeg" title="导出尺寸(越小文件越小)">
-          <button data-sz="orig" class="on">原尺寸</button>
-          <button data-sz="1080">1080p</button>
-          <button data-sz="720">720p</button>
-        </div>
-        <div class="seg" id="fmtSeg">
-          <button data-fmt="mp4" class="on">MP4</button>
-          <button data-fmt="webm">WebM</button>
-          <button data-fmt="gif">GIF</button>
-        </div>
-        <button id="export" class="btn-primary">导出</button>
       </div>
     </header>
 
@@ -115,15 +130,20 @@
         </div>
 
         <div class="group beautify-only" id="gMotion">
-          <div class="ghead"><span class="gtitle">运镜与光标</span></div>
-          <label class="sw"><span class="lbl">跟随点击自动放大<span class="sub">点击处平滑推近,像 Screen Studio</span></span><input type="checkbox" id="autoZoom" /><span class="track-sw"></span></label>
+          <div class="ghead"><span class="gtitle">运镜</span></div>
+          <label class="sw"><span class="lbl">跟随点击自动放大<span class="sub">点到哪里,镜头平滑推到哪里</span></span><input type="checkbox" id="autoZoom" /><span class="track-sw"></span></label>
           <label class="row"><span>倍数</span><input id="zoomLevel" type="range" min="100" max="250" /><span class="val" id="vZoom"></span></label>
-          <label class="sw"><span class="lbl">点击波纹<span class="sub">点击处珊瑚色扩散环</span></span><input type="checkbox" id="clickFx" /><span class="track-sw"></span></label>
-          <label class="sw"><span class="lbl">按键浮层<span class="sub">显示按下的快捷键(只记组合键,不记打字内容)</span></span><input type="checkbox" id="keyFx" /><span class="track-sw"></span></label>
-          <label class="sw"><span class="lbl">补画光标<span class="sub">录像里没有鼠标时,叠一个干净光标</span></span><input type="checkbox" id="cursorOn" /><span class="track-sw"></span></label>
-          <label class="row"><span>光标大小</span><input id="cursorSize" type="range" min="70" max="200" /><span class="val" id="vCurSize"></span></label>
-          <label class="row"><span>光标平滑</span><input id="cursorSmooth" type="range" min="0" max="300" step="10" /><span class="val" id="vCurSmooth"></span></label>
+          <p class="gdesc">每一段运镜都画在时间轴上方的细轨里:点选可改时长、倍数、焦点,或删除。</p>
           <p class="gdesc" id="trackInfo"></p>
+        </div>
+
+        <div class="group beautify-only" id="gCursor">
+          <div class="ghead"><span class="gtitle">光标与按键</span></div>
+          <label class="sw"><span class="lbl">点击波纹<span class="sub">每次点击泛起一圈珊瑚色涟漪</span></span><input type="checkbox" id="clickFx" /><span class="track-sw"></span></label>
+          <label class="sw"><span class="lbl">按键浮层<span class="sub">把按下的快捷键显示在画面下方</span></span><input type="checkbox" id="keyFx" /><span class="track-sw"></span></label>
+          <label class="sw"><span class="lbl">补画光标<span class="sub">平滑光标录制会自动开启</span></span><input type="checkbox" id="cursorOn" /><span class="track-sw"></span></label>
+          <label class="row"><span>大小</span><input id="cursorSize" type="range" min="70" max="200" /><span class="val" id="vCurSize"></span></label>
+          <label class="row"><span>平滑</span><input id="cursorSmooth" type="range" min="0" max="300" step="10" /><span class="val" id="vCurSmooth"></span></label>
         </div>
 
         <div class="group" id="gCam" hidden>

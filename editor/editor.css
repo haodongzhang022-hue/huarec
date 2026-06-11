@@ -47,6 +47,23 @@ body {
 .btn-ghost { all: unset; cursor: pointer; padding: 8px 14px; border-radius: 9px; color: var(--text2); font-size: 13px; font-weight: 500; }
 .btn-ghost:hover { color: var(--text); background: rgba(255,255,255,0.06); }
 
+/* 导出浮层:导出前的三个决定(比例/分辨率/格式)集中在这里,顶栏只留一个入口 */
+.export-wrap { position: relative; }
+.export-menu {
+  position: absolute; right: 0; top: calc(100% + 10px); width: 304px; z-index: 30;
+  background: #28282d;
+  border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 16px;
+  box-shadow: 0 22px 60px rgba(0,0,0,0.65);
+}
+.em-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.em-row > span { font-size: 12.5px; color: var(--text2); flex: none; }
+.em-go { display: block; width: 100%; text-align: center; padding: 10px; font-size: 13.5px; margin-top: 4px; }
+.em-raw {
+  all: unset; display: block; width: 100%; cursor: pointer; text-align: center;
+  margin-top: 10px; padding: 6px; border-radius: 8px; font-size: 11.5px; color: var(--text3);
+}
+.em-raw:hover { color: var(--text2); background: rgba(255,255,255,0.05); }
+
 /* ===== 布局 ===== */
 .editor-grid { display: grid; grid-template-columns: 1fr 312px; height: calc(100vh - 52px); }
 .stage-col { display: flex; flex-direction: column; min-width: 0; }
@@ -69,8 +86,12 @@ body {
 .t { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text2); min-width: 38px; }
 /* 胶片缩略图轨道:看得见在剪哪一段 */
 .strip-col { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-/* 运镜轨:胶片上方一条细轨,胶囊 = 一段运镜 */
+/* 运镜轨:胶片上方一条细轨,胶囊 = 一段运镜;左侧常驻小字标识这是什么 */
 .zoom-lane { position: relative; height: 13px; }
+.zoom-lane::before {
+  content: '运镜'; position: absolute; left: 2px; top: 0; line-height: 13px;
+  font-size: 9px; letter-spacing: 0.06em; color: var(--text3); pointer-events: none;
+}
 .zoom-lane.off { opacity: 0.3; }
 .zoom-pill {
   position: absolute; top: 0; bottom: 0; min-width: 8px; border-radius: 99px;
@@ -108,11 +129,12 @@ body {
 .master-seg .seg { display: flex; width: 100%; }
 .master-seg .seg button { flex: 1; padding: 7px; font-size: 13px; }
 
-/* 画廊式扁平分区:去卡片化,标题 + 呼吸间距撑结构(方向 B) */
-.group { padding: 20px 2px 0; }
+/* 画廊式扁平分区:发丝线分隔 + 呼吸间距撑结构 */
+.group { padding: 18px 2px 18px; border-top: 1px solid var(--sep); }
+.panel > .master-seg + .group, .panel > .group:first-child { border-top: none; }
 .group.dim { opacity: 0.4; pointer-events: none; filter: grayscale(0.3); }
 .ghead { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
-.gtitle { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+.gtitle { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; }
 .gdesc { font-size: 11px; color: var(--text3); margin: 8px 0 2px; line-height: 1.5; }
 .ghead + .gdesc { margin: 0 0 4px; }
 

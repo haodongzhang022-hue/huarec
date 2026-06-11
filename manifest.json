@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "HuaRec 花录 · 电影感网页录屏",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "一键起录、本地秒存、自带电影感运镜与 macOS 风背景的网页录屏工具。",
   "permissions": ["tabCapture", "offscreen", "storage", "scripting", "activeTab", "alarms"],
   "host_permissions": ["http://*/*", "https://*/*"],

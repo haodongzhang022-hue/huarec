@@ -14,3 +14,4 @@
 # 编辑器 / 依赖
 .vscode/
 node_modules/
+dev/shots/

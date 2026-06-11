@@ -11,41 +11,47 @@
         <img src="../icons/icon48.png" alt="" width="22" height="22" />
         <span>HuaRec <em>花录</em></span>
       </div>
-      <button id="library" class="ghost" title="录制库">最近</button>
+      <button id="library" class="ghost" title="打开录制库">录制库</button>
     </header>
 
-    <!-- 待机视图:一键起录,不在录前做任何选择(皮肤/美化都在编辑器里调) -->
+    <!-- 待机视图:一个主按钮 + 两组录制选项;美化/运镜都在录完后的编辑器里调 -->
     <section id="idle">
       <button id="start" class="start">
         <span class="ring"></span>
         开始录制
       </button>
 
-      <label class="toggle">
-        <input type="checkbox" id="audio" checked />
-        <span>录制标签页声音</span>
-      </label>
-      <label class="toggle">
-        <input type="checkbox" id="cursor" checked />
-        <span>美化录制光标</span>
-      </label>
-      <label class="toggle" title="录制时把真实光标缩成近隐形小点,导出时重绘一个平滑顺滑的大光标(Screen Studio 式)">
-        <input type="checkbox" id="smooth" />
-        <span>平滑光标(后期重绘)</span>
-      </label>
-      <label class="toggle">
-        <input type="checkbox" id="camera" />
-        <span>同时录制摄像头</span>
-      </label>
-      <label class="toggle">
-        <input type="checkbox" id="mic" />
-        <span>录制麦克风旁白</span>
-      </label>
-      <video id="camPreview" autoplay muted playsinline hidden></video>
-      <p class="cam-hint" id="camHint" hidden>位置 / 大小 / 样式 / 美颜,录完后在编辑器里调</p>
-      <p class="cam-hint" id="micHint" hidden>旁白单独成轨,音量录完再调 · 外放时建议戴耳机防回声</p>
+      <div class="card">
+        <label class="opt">
+          <span class="ol">标签页声音</span>
+          <input type="checkbox" id="audio" checked /><span class="sw-t"></span>
+        </label>
+        <label class="opt">
+          <span class="ol">麦克风旁白<small>独立成轨,音量录完再调 · 外放建议戴耳机</small></span>
+          <input type="checkbox" id="mic" /><span class="sw-t"></span>
+        </label>
+        <label class="opt">
+          <span class="ol">摄像头小窗<small>位置 / 大小 / 美颜,全部录完再调</small></span>
+          <input type="checkbox" id="camera" /><span class="sw-t"></span>
+        </label>
+        <video id="camPreview" autoplay muted playsinline hidden></video>
+      </div>
 
-      <p class="hint">点上方按钮或按 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> 起录<br/>美化、皮肤、运镜都在录完后的编辑器里调</p>
+      <div class="card">
+        <div class="opt col">
+          <div class="opt-top">
+            <span class="ol">光标</span>
+            <div class="seg" id="cursorSeg">
+              <button data-cur="raw">原始</button>
+              <button data-cur="enhance" class="on">美化</button>
+              <button data-cur="smooth">平滑</button>
+            </div>
+          </div>
+          <small id="curHint"></small>
+        </div>
+      </div>
+
+      <p class="hint"><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> 随时起录 / 停止 · 背景、运镜、剪辑都在录完后的编辑器里</p>
     </section>
 
     <!-- 录制中视图:计时 + 暂停 + 停止,全部留在工具栏弹窗里 -->
@@ -61,7 +67,7 @@
       </div>
       <button id="switchHere" class="ghost-line" hidden>⇄ 把录制切到当前标签页</button>
       <button id="stopDl" class="ghost-line">停止 · 直接下载源片(不修)</button>
-      <p class="hint">关掉这个弹窗不会停止录制 · 切换标签页会自动跟录 · 按 <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> 可随时停</p>
+      <p class="hint">关掉弹窗不会停止录制 · 切换标签页会自动跟录 · <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> 随时停</p>
     </section>
 
     <p id="error" class="error" hidden></p>

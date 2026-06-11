@@ -10,12 +10,12 @@ async function setCamPreview(on, interactive) {
   const v = $('camPreview');
   if (!on) {
     if (camStream) camStream.getTracks().forEach((t) => t.stop());
-    camStream = null; v.srcObject = null; v.hidden = true; $('camHint').hidden = true;
+    camStream = null; v.srcObject = null; v.hidden = true;
     return true;
   }
   try {
     camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-    v.srcObject = camStream; v.hidden = false; $('camHint').hidden = false;
+    v.srcObject = camStream; v.hidden = false;
     return true;
   } catch (e) {
     if (!interactive) return false;
@@ -52,16 +52,32 @@ async function checkMic(interactive) {
   }
 }
 
+// 光标三选一:原始(页面原样)/ 美化(macOS 风箭头)/ 平滑(隐形小点 + 后期重绘)
+let curMode = 'enhance';
+const CUR_HINTS = {
+  raw: '保持页面原本的光标,不做处理',
+  enhance: '画面里的光标换成干净的 macOS 风箭头',
+  smooth: '录完后期重绘:大小可调、移动丝滑,教程首选',
+};
+function setCurMode(m, save) {
+  curMode = m;
+  document.querySelectorAll('#cursorSeg button').forEach((b) => b.classList.toggle('on', b.dataset.cur === m));
+  $('curHint').textContent = CUR_HINTS[m];
+  if (save) chrome.storage.local.set({ lastCursor: m !== 'raw', lastSmooth: m === 'smooth' });
+}
+
 async function init() {
   const { lastAudio, lastCursor, lastCamera, lastMic, lastSmooth } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera', 'lastMic', 'lastSmooth']);
   if (lastAudio === false) $('audio').checked = false;
-  if (lastCursor === false) $('cursor').checked = false;
-  if (lastSmooth === true) $('smooth').checked = true;
+  setCurMode(lastSmooth === true ? 'smooth' : lastCursor === false ? 'raw' : 'enhance', false);
+  document.querySelectorAll('#cursorSeg button').forEach((b) => {
+    b.addEventListener('click', () => setCurMode(b.dataset.cur, true));
+  });
   if (lastCamera === true) {
     $('camera').checked = true;
     setCamPreview(true, false).then((ok) => { if (!ok) $('camera').checked = false; });
   }
-  if (lastMic === true) { $('mic').checked = true; $('micHint').hidden = false; }
+  if (lastMic === true) $('mic').checked = true;
   $('camera').addEventListener('change', async (e) => {
     const ok = await setCamPreview(e.target.checked, true);
     if (!ok) e.target.checked = false;
@@ -69,7 +85,6 @@ async function init() {
   });
   $('mic').addEventListener('change', async (e) => {
     if (e.target.checked && !(await checkMic(true))) e.target.checked = false;
-    $('micHint').hidden = !e.target.checked;
     chrome.storage.local.set({ lastMic: $('mic').checked });
   });
 
@@ -142,10 +157,10 @@ async function refresh() {
 
 async function start() {
   const audio = $('audio').checked;
-  const enhanceCursor = $('cursor').checked;
   const camera = $('camera').checked;
   const mic = $('mic').checked;
-  const smoothCursor = $('smooth').checked;
+  const enhanceCursor = curMode !== 'raw';
+  const smoothCursor = curMode === 'smooth';
   chrome.storage.local.set({ lastAudio: audio, lastCursor: enhanceCursor, lastCamera: camera, lastMic: mic, lastSmooth: smoothCursor });
   // 先放掉弹窗占用的摄像头,offscreen 才能稳拿同一台设备
   await setCamPreview(false);
