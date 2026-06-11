@@ -1,9 +1,10 @@
 // offscreen 录制文档:持有 MediaRecorder,录制 tabCapture 流。
-import { saveRecording } from './lib/db.js';
+// 切片不堆内存:每片落地 IndexedDB(chunks 表),停止时读回合并。
+// 这样长录制内存恒定,浏览器崩溃后还能凭残留切片恢复半截录像。
+import { saveRecording, appendChunk, getSessionChunks, putSession, deleteSession } from './lib/db.js';
 import { fixWebmDuration } from './lib/vendor/fix-webm-duration.mjs';
 
 let recorder = null;
-let chunks = [];
 let stream = null;
 let audioCtx = null;
 let startTime = 0;
@@ -12,10 +13,26 @@ let pausedAt = 0;
 let meta = {};
 // 摄像头轨:单独录一条 WebM,不烤进屏幕画面 → 编辑器里作为可调气泡合成(位置/大小/美颜录后随便改)
 let camRecorder = null;
-let camChunks = [];
 let camStream = null;
 let camStartTime = 0;
-let camStopped = null; // camRecorder 完全停止(chunks 已 flush)的 promise
+let camStopped = null; // camRecorder 完全停止(最后一片已派发)的 promise
+
+// ---- 切片流式写入 ----
+// 写操作串成 promise 链:保证 seq 顺序落库,停止时 await 链尾即可确认全部写完。
+let session = '';
+let seqScreen = 0, seqCam = 0;
+let writeChain = Promise.resolve();
+function pushChunk(track, data) {
+  const seq = track === 'cam' ? ++seqCam : ++seqScreen;
+  writeChain = writeChain
+    .then(() => appendChunk({ session, track, seq, data }))
+    .catch((e) => console.warn('切片入库失败:', e.message));
+}
+// 会话行随录制进展更新(startTime/camStartTime/meta),崩溃恢复时凭它算时长与摄像头偏移
+function updateSession() {
+  putSession({ session, createdAt: meta.createdAt || Date.now(), startTime, camStartTime, meta })
+    .catch((e) => console.warn('会话登记失败:', e.message));
+}
 
 function reply(type, extra = {}) {
   chrome.runtime.sendMessage({ type, target: 'background', ...extra }).catch(() => {});
@@ -34,7 +51,9 @@ function pickMime() {
 }
 
 async function start(streamId, options) {
-  chunks = [];
+  session = 'sess_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+  seqScreen = 0; seqCam = 0; writeChain = Promise.resolve();
+  startTime = 0; camStartTime = 0;
   // 黑边根治:tabCapture 的捕获帧若用默认比例,会把比例不同的网页 letterbox(黑边烤进像素)。
   // 这里用 background 测得的【视口真实设备像素】把捕获盒子锁成和网页一模一样的比例和尺寸 →
   // 内容刚好填满捕获帧,不留黑边。拿不到视口尺寸时退回只限帧率(不强加任何固定比例)。
@@ -73,8 +92,10 @@ async function start(streamId, options) {
     createdAt: Date.now(),
   };
 
+  updateSession(); // 先登记会话:此刻起的任何崩溃,切片都有主可寻
+
   // 摄像头轨:取流失败(没设备/没权限/被占用)只降级为纯录屏,绝不让整次录制失败。
-  camRecorder = null; camChunks = []; camStream = null; camStartTime = 0; camStopped = null;
+  camRecorder = null; camStream = null; camStopped = null;
   if (options.camera) {
     try {
       camStream = await navigator.mediaDevices.getUserMedia({
@@ -83,8 +104,8 @@ async function start(streamId, options) {
       });
       const camMime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
       camRecorder = new MediaRecorder(camStream, { mimeType: camMime, videoBitsPerSecond: 5_000_000 });
-      camRecorder.ondataavailable = (e) => { if (e.data && e.data.size) camChunks.push(e.data); };
-      camRecorder.onstart = () => { camStartTime = Date.now(); };
+      camRecorder.ondataavailable = (e) => { if (e.data && e.data.size) pushChunk('cam', e.data); };
+      camRecorder.onstart = () => { camStartTime = Date.now(); updateSession(); };
       camStopped = new Promise((res) => { camRecorder.onstop = res; });
       camRecorder.start(1000);
     } catch (e) {
@@ -101,41 +122,55 @@ async function start(streamId, options) {
   recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: vbps });
   meta.mime = mimeType;
 
-  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) pushChunk('screen', e.data); };
   recorder.onstart = () => {
     startTime = Date.now();
     pausedTotal = 0; pausedAt = 0;
+    updateSession();
     reply('OFFSCREEN_STARTED', { startTime });
   };
   recorder.onstop = onStop;
-  recorder.start(1000); // 每秒切片,便于长录制
+  recorder.start(1000); // 每秒切片,流式落库,长录制内存恒定
 }
 
 async function onStop() {
-  let blob = new Blob(chunks, { type: 'video/webm' });
   const id = 'rec_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
-  if (pausedAt) { pausedTotal += Date.now() - pausedAt; pausedAt = 0; }
-  meta.durationMs = Date.now() - startTime - pausedTotal;
-  // MediaRecorder 的 WebM 没有 Duration 元数据 → 播放器拖不动进度条,编辑器要 seek 到末尾探测时长。
-  // 存库前补写;失败就保留原 blob(老行为),不阻塞保存。
-  try { blob = await fixWebmDuration(blob, meta.durationMs, { logger: false }); } catch (_) {}
-  // 摄像头轨收尾:等它的 chunks 全部 flush,记录与屏幕轨的起点偏移供编辑器对齐
-  let camBlob = null;
+  const stopAt = Date.now();
+  if (pausedAt) { pausedTotal += stopAt - pausedAt; pausedAt = 0; }
+  meta.durationMs = stopAt - startTime - pausedTotal;
+  // 摄像头轨收尾:stop() 会先派发最后一片再触发 onstop,等它停稳切片才齐
   if (camRecorder) {
     try {
       if (camRecorder.state !== 'inactive') camRecorder.stop();
       await camStopped;
-      if (camChunks.length) {
-        camBlob = new Blob(camChunks, { type: 'video/webm' });
-        meta.hasCam = true;
-        meta.camOffsetMs = camStartTime - startTime;
-        const camDur = Date.now() - camStartTime - pausedTotal;
-        try { camBlob = await fixWebmDuration(camBlob, camDur, { logger: false }); } catch (_) {}
-      }
-    } catch (e) { console.warn('摄像头轨保存失败,仅保留屏幕轨:', e.message); }
+    } catch (e) { console.warn('摄像头轨停止异常:', e.message); }
+  }
+  await writeChain; // 全部切片落库完毕
+  let blob = null, camBlob = null;
+  try {
+    const rows = await getSessionChunks(session);
+    blob = new Blob(rows.filter((r) => r.track === 'screen').map((r) => r.data), { type: 'video/webm' });
+    const camParts = rows.filter((r) => r.track === 'cam').map((r) => r.data);
+    if (camParts.length) {
+      camBlob = new Blob(camParts, { type: 'video/webm' });
+      meta.hasCam = true;
+      meta.camOffsetMs = camStartTime - startTime;
+    }
+  } catch (e) {
+    reply('OFFSCREEN_STOPPED', { id: null, error: '读取录制切片失败:' + e.message });
+    cleanup();
+    return;
+  }
+  // MediaRecorder 的 WebM 没有 Duration 元数据 → 播放器拖不动进度条,编辑器要 seek 到末尾探测时长。
+  // 存库前补写;失败就保留原 blob(老行为),不阻塞保存。
+  try { blob = await fixWebmDuration(blob, meta.durationMs, { logger: false }); } catch (_) {}
+  if (camBlob) {
+    const camDur = stopAt - camStartTime - pausedTotal;
+    try { camBlob = await fixWebmDuration(camBlob, camDur, { logger: false }); } catch (_) {}
   }
   try {
     await saveRecording({ id, blob, camBlob, cursor: [], clicks: [], meta });
+    await deleteSession(session).catch(() => {}); // 成品已落库,切片使命完成
     reply('OFFSCREEN_STOPPED', { id, meta });
   } catch (e) {
     reply('OFFSCREEN_STOPPED', { id: null, error: e.message });
@@ -147,8 +182,8 @@ function cleanup() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
   if (camStream) camStream.getTracks().forEach((t) => t.stop());
   if (audioCtx) audioCtx.close().catch(() => {});
-  stream = null; audioCtx = null; recorder = null; chunks = [];
-  camStream = null; camRecorder = null; camChunks = []; camStopped = null;
+  stream = null; audioCtx = null; recorder = null;
+  camStream = null; camRecorder = null; camStopped = null;
 }
 
 chrome.runtime.onMessage.addListener((msg) => {

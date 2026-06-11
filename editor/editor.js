@@ -1,6 +1,10 @@
 import { BACKGROUNDS, getSkin, getBackground } from '../lib/presets.js';
 import { drawScene, buildZoomSegments, preloadBackground, drawCamera, cameraRect } from './render.js';
-import { getRecording, listRecordings, deleteRecording } from '../lib/db.js';
+import {
+  getRecording, listRecordings, deleteRecording, saveRecording,
+  getProject, saveProject, getAllProjects,
+  getSessions, getSessionChunks, deleteSession,
+} from '../lib/db.js';
 import { exportMedia } from './exporter.js';
 
 const $ = (id) => document.getElementById(id);
@@ -25,6 +29,7 @@ let currentSkinId = 'huashu';
 let camVideo = null, camDur = 0, camOffset = 0; // 摄像头轨:独立 video 元素 + 与屏幕轨的起点偏移
 let camCfg = null;                              // 气泡配置 {show,x,y,size,shape,beauty,mirror,ring}
 let savedCamPrefs = null;                       // 本段没有摄像头轨时,保住已存的摄像头偏好不被 savePrefs 覆盖
+let proj = null, projTimer = null;              // 本段录制的编辑工程(剪辑/美化/摄像头),防抖持久化,关页不丢
 
 const id = new URLSearchParams(location.search).get('id');
 if (id) loadEditor(id); else showLibrary();
@@ -32,19 +37,89 @@ if (id) loadEditor(id); else showLibrary();
 // ================= 录制库 =================
 async function showLibrary() {
   $('libraryView').hidden = false;
-  const rows = await listRecordings();
+  showStorageUsage();
+  await showOrphans();
+  const [rows, projects] = await Promise.all([listRecordings(), getAllProjects().catch(() => [])]);
+  const pmap = new Map(projects.map((p) => [p.id, p]));
   if (!rows.length) { $('recEmpty').hidden = false; return; }
   const list = $('recList'); list.innerHTML = '';
   for (const r of rows) {
+    const p = pmap.get(r.id);
     const dur = r.meta?.durationMs ? fmt(r.meta.durationMs) : '—';
     const when = r.meta?.createdAt ? new Date(r.meta.createdAt).toLocaleString('zh-CN') : '';
+    const name = p?.title || `录制 · ${dur}`;
     const el = document.createElement('div');
     el.className = 'rec-item';
-    el.innerHTML = `<div class="meta"><div class="title">录制 · ${dur}</div><div class="sub">${when} · ${(r.size / 1048576).toFixed(1)} MB</div></div>
+    el.innerHTML = `<div class="poster">${p?.poster ? `<img src="${p.poster}" alt="" />` : ''}</div>
+      <div class="meta"><div class="title"></div><div class="sub">${when} · ${dur} · ${(r.size / 1048576).toFixed(1)} MB${r.meta?.recovered ? ' · 已恢复' : ''}</div></div>
+      <button class="btn-ghost" data-rename title="重命名">改名</button>
       <button class="btn-primary" data-open>编辑</button><button class="btn-ghost" data-del>删除</button>`;
+    el.querySelector('.title').textContent = name;
     el.querySelector('[data-open]').onclick = () => { location.search = `?id=${r.id}`; };
-    el.querySelector('[data-del]').onclick = async () => { await deleteRecording(r.id); el.remove(); };
+    el.querySelector('[data-del]').onclick = async () => { await deleteRecording(r.id); el.remove(); showStorageUsage(); };
+    el.querySelector('[data-rename]').onclick = async () => {
+      const t = prompt('给这段录制起个名字:', p?.title || '');
+      if (t === null) return;
+      const row = (await getProject(r.id).catch(() => null)) || { id: r.id };
+      row.title = t.trim();
+      await saveProject(row);
+      el.querySelector('.title').textContent = row.title || `录制 · ${dur}`;
+    };
     list.appendChild(el);
+  }
+}
+
+async function showStorageUsage() {
+  try {
+    const est = await navigator.storage.estimate();
+    const gb = (n) => (n / 1073741824).toFixed(n > 1073741824 ? 1 : 2);
+    $('storageInfo').textContent = `本地已用 ${gb(est.usage)} GB / 可用约 ${gb(est.quota)} GB`;
+  } catch (_) {}
+}
+
+// 孤儿会话 = 录到一半浏览器崩了留下的切片。WebM 是流式格式,半截也能拼回可播的录像。
+async function showOrphans() {
+  let sessions = [];
+  try { sessions = await getSessions(); } catch (_) { return; }
+  if (!sessions.length) return;
+  // 正在录制的会话不是孤儿,别提示恢复
+  const st = await chrome.runtime.sendMessage({ type: 'GET_STATE' }).catch(() => null);
+  if (st && st.status !== 'idle') return;
+  const wrap = $('recoverList'); wrap.innerHTML = ''; wrap.hidden = false;
+  for (const s of sessions) {
+    const when = s.createdAt ? new Date(s.createdAt).toLocaleString('zh-CN') : '';
+    const el = document.createElement('div');
+    el.className = 'recover-item';
+    el.innerHTML = `<span>⚠ 有一段录制中断了(${when}),已录部分仍可找回</span>
+      <button class="btn-primary" data-rec>恢复</button><button class="btn-ghost" data-drop>丢弃</button>`;
+    el.querySelector('[data-rec]').onclick = () => recoverSession(s, el);
+    el.querySelector('[data-drop]').onclick = async () => { await deleteSession(s.session); el.remove(); showStorageUsage(); };
+    wrap.appendChild(el);
+  }
+}
+
+async function recoverSession(s, el) {
+  el.querySelector('[data-rec]').textContent = '恢复中…';
+  try {
+    const rows = await getSessionChunks(s.session);
+    const screen = rows.filter((r) => r.track === 'screen').map((r) => r.data);
+    if (!screen.length) { await deleteSession(s.session); el.remove(); return; }
+    const blob = new Blob(screen, { type: 'video/webm' });
+    const camParts = rows.filter((r) => r.track === 'cam').map((r) => r.data);
+    const camBlob = camParts.length ? new Blob(camParts, { type: 'video/webm' }) : null;
+    // durationMs 未知(=0),编辑器打开时会自动探测;摄像头偏移凭会话行里记下的两个起点算
+    const meta = { ...(s.meta || {}), createdAt: s.createdAt, durationMs: 0, recovered: true };
+    if (camBlob) {
+      meta.hasCam = true;
+      meta.camOffsetMs = s.camStartTime && s.startTime ? s.camStartTime - s.startTime : 0;
+    }
+    const id = 'rec_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+    await saveRecording({ id, blob, camBlob, cursor: [], clicks: [], acts: [], meta });
+    await deleteSession(s.session);
+    location.search = `?id=${id}`;
+  } catch (e) {
+    alert('恢复失败:' + e.message);
+    el.querySelector('[data-rec]').textContent = '恢复';
   }
 }
 
@@ -54,6 +129,7 @@ async function loadEditor(recId) {
   const rec = await getRecording(recId);
   if (!rec || !rec.blob) { alert('找不到这段录制'); location.search = ''; return; }
   rawBlob = rec.blob; recMeta = rec.meta || {};
+  proj = (await getProject(recId).catch(() => null)) || { id: recId };
   // 「停止·直接下载」路径:一打开就自动存下源片,用户拿了文件可直接关页(也可留下来继续修)
   if (new URLSearchParams(location.search).get('dl') === '1') setTimeout(() => download(rawBlob, 'webm'), 300);
 
@@ -74,6 +150,13 @@ async function loadEditor(recId) {
   videoDur = (isFinite(video.duration) ? video.duration : (recMeta.durationMs || 0) / 1000) * 1000;
   segments = [{ s: 0, e: videoDur, speed: 1 }]; playSrc = 0; playIdx = 0;
   viewStart = 0; viewEnd = videoDur;
+  // 恢复上次的剪辑(工程持久化):片段裁到当前时长内,全失效就回退整段
+  if (proj.segments && proj.segments.length) {
+    const kept = proj.segments
+      .filter((s) => s.s >= 0 && s.s < videoDur && s.e > s.s)
+      .map((s) => ({ s: s.s, e: Math.min(s.e, videoDur), speed: s.speed || 1 }));
+    if (kept.length) segments = kept;
+  }
 
   data = { cursor: rec.cursor || [], clicks: rec.clicks || [], acts: rec.acts || [], zoomSegs: buildZoomSegments(rec.clicks || []) };
   // 诊断:自动放大/点击波纹都依赖录制时采到的点击;为空就直接告诉花叔,免得以为功能坏了
@@ -87,6 +170,16 @@ async function loadEditor(recId) {
   const prefs = await loadPrefs();
   applySkin(getSkin(prefs.skinId || recMeta.skinId || 'huashu'), prefs);
   beautify = true;
+  // 本段录制有工程就用工程(对这一段的决定优先于全局偏好)
+  if (proj.cfg) {
+    const pc = proj.cfg;
+    cfg = {
+      background: getBackground(pc.background), padding: pc.padding, radius: pc.radius, shadow: pc.shadow,
+      accent: cfg.accent, clickFx: pc.clickFx, cursor: pc.cursor, autoZoom: pc.autoZoom, zoomLevel: pc.zoomLevel,
+    };
+  }
+  if (typeof proj.beautify === 'boolean') beautify = proj.beautify;
+  document.querySelectorAll('#beautifySeg button').forEach((b) => b.classList.toggle('on', b.dataset.b === (beautify ? '1' : '0')));
   preloadBackground(cfg.background); // 壁纸解码完成后帧循环自然画上
 
   // 摄像头轨:有就建第二个 video,气泡浮在画面上(位置/大小/样式/美颜都在这里调)
@@ -100,8 +193,8 @@ async function loadEditor(recId) {
     await once(camVideo, 'loadedmetadata');
     camDur = isFinite(camVideo.duration) && camVideo.duration > 0 ? camVideo.duration * 1000 : videoDur;
     camOffset = recMeta.camOffsetMs || 0;
-    // show 不持久化:每段录制默认显示,藏不藏是对这一段的决定
-    camCfg = { x: 0.86, y: 0.82, size: 0.24, shape: 'circle', beauty: 0.4, mirror: true, ring: true, ...(savedCamPrefs || {}), show: true };
+    // 配置优先级:本段工程 > 全局偏好 > 默认;show 只存在工程里(藏不藏是对这一段的决定)
+    camCfg = { x: 0.86, y: 0.82, size: 0.24, shape: 'circle', beauty: 0.4, mirror: true, ring: true, show: true, ...(savedCamPrefs || {}), ...(proj.camCfg || {}) };
     syncCam(true);
     bindCamControls(); syncCamControls();
   }
@@ -111,6 +204,7 @@ async function loadEditor(recId) {
   syncBeautifyUI();
   recompute(); syncControls(); render(); syncTimeline();
   requestAnimationFrame(frame);
+  if (!proj.poster) makePoster(); // 录制库封面,只生成一次
   buildFilmstrip(); // 异步生成缩略图,不阻塞首屏
 }
 
@@ -121,6 +215,35 @@ function prepDuration() {
     const onTime = () => { if (video.currentTime > 0) { video.removeEventListener('timeupdate', onTime); res(); } };
     video.addEventListener('timeupdate', onTime); video.currentTime = 1e7;
   });
+}
+
+// ---- 工程持久化(每段录制独立,关页不丢) ----
+// 与大 blob 分开存(projects 表),滑杆级高频改动只写这一小行。
+function scheduleProjectSave() {
+  if (!proj) return;
+  clearTimeout(projTimer);
+  projTimer = setTimeout(() => {
+    proj.segments = segments.map((s) => ({ ...s }));
+    proj.beautify = beautify;
+    proj.cfg = {
+      background: cfg.background.id, padding: cfg.padding, radius: cfg.radius, shadow: cfg.shadow,
+      clickFx: cfg.clickFx, cursor: cfg.cursor, autoZoom: cfg.autoZoom, zoomLevel: cfg.zoomLevel,
+    };
+    proj.camCfg = camCfg ? { ...camCfg } : null;
+    proj.savedAt = Date.now();
+    saveProject(proj).catch((e) => console.warn('工程保存失败:', e.message));
+  }, 800);
+}
+
+// 库列表封面:抓当前帧(刚打开时是第 0 帧)缩成小图存进工程行
+function makePoster() {
+  try {
+    const pw = 320, ph = Math.max(2, Math.round(320 * H / W));
+    const pc = document.createElement('canvas'); pc.width = pw; pc.height = ph;
+    pc.getContext('2d').drawImage(video, 0, 0, pw, ph);
+    proj.poster = pc.toDataURL('image/jpeg', 0.7);
+    scheduleProjectSave();
+  } catch (_) {}
 }
 
 // ---- 偏好持久化 ----
@@ -134,6 +257,7 @@ function savePrefs() {
     background: cfg.background.id, autoZoom: cfg.autoZoom, zoomLevel: cfg.zoomLevel,
     clickFx: cfg.clickFx, cursor: cfg.cursor, camera,
   } });
+  scheduleProjectSave(); // 全局偏好动了,本段工程也跟着记一笔
 }
 
 function applySkin(skin, prefs = {}) {
@@ -377,7 +501,7 @@ function bindTimeline() {
   wireSeg('selSpeedSeg', (v) => { if (sel) { pushHistory(); setSpeedRange(sel.a, sel.b, +v); recompute(); afterEdit(); } }, 'sp');
   $('resetEdits').onclick = () => { pushHistory(); segments = [{ s: 0, e: videoDur, speed: 1 }]; sel = null; recompute(); afterEdit(); };
 }
-function afterEdit() { syncSelBar(); seekPreview(Math.min(playSrc, videoDur)); }
+function afterEdit() { syncSelBar(); seekPreview(Math.min(playSrc, videoDur)); scheduleProjectSave(); }
 
 // ---- 自动剪空白 ----
 // 活动信号取并集:光标移动 / 点击 / 键盘·滚轮心跳 / 音频能量(有声音=有内容,网页在播视频时不会被误剪)。
@@ -488,7 +612,7 @@ function bindKeys() {
 
 // ---- 分段控制器 ----
 function bindSegments() {
-  wireSeg('beautifySeg', (v) => { beautify = v === '1'; syncBeautifyUI(); render(); });
+  wireSeg('beautifySeg', (v) => { beautify = v === '1'; syncBeautifyUI(); render(); scheduleProjectSave(); });
   wireSeg('fmtSeg', (v) => { fmtSel = v; }, 'fmt');
   wireSeg('sizeSeg', (v) => { exportSize = v; }, 'sz');
 }
