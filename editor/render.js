@@ -325,6 +325,39 @@ function camShapePath(ctx, r, shape) {
   }
 }
 
+// 美颜 = 边缘保护磨皮(surface blur 近似)。纯高斯模糊会把五官一起糊掉(翻车过),
+// 正确做法:按「原图 vs 模糊图的亮度差」逐像素加权 —— 差小 = 皮肤纹理/噪点 → 用模糊抹平;
+// 差大 = 眼睛/轮廓/发丝等边缘 → 保留原图。最后按强度轻微提亮提饱和(气色),结构不动。
+const beautyCanvas = document.createElement('canvas');
+function applyBeauty(tctx, tw, th, strength) {
+  beautyCanvas.width = tw; beautyCanvas.height = th;
+  const bctx = beautyCanvas.getContext('2d', { willReadFrequently: true });
+  bctx.filter = `blur(${Math.max(2, tw / 80).toFixed(1)}px)`;
+  bctx.drawImage(camCanvas, 0, 0);
+  bctx.filter = 'none';
+  const orig = tctx.getImageData(0, 0, tw, th);
+  const blur = bctx.getImageData(0, 0, tw, th);
+  const o = orig.data, b = blur.data;
+  const T1 = 6, T2 = 26; // 亮度差阈值:<T1 全用模糊,>T2 全保原图,中间线性过渡
+  for (let i = 0; i < o.length; i += 4) {
+    const dl = Math.abs(
+      (o[i] * 0.299 + o[i + 1] * 0.587 + o[i + 2] * 0.114) -
+      (b[i] * 0.299 + b[i + 1] * 0.587 + b[i + 2] * 0.114)
+    );
+    let w = (dl - T1) / (T2 - T1);
+    w = w < 0 ? 0 : w > 1 ? 1 : w;
+    const m = (1 - w) * strength; // 混入模糊的比例
+    o[i] += (b[i] - o[i]) * m;
+    o[i + 1] += (b[i + 1] - o[i + 1]) * m;
+    o[i + 2] += (b[i + 2] - o[i + 2]) * m;
+  }
+  tctx.putImageData(orig, 0, 0);
+  tctx.save();
+  tctx.filter = `brightness(${(1 + 0.05 * strength).toFixed(3)}) saturate(${(1 + 0.04 * strength).toFixed(3)})`;
+  tctx.drawImage(camCanvas, 0, 0);
+  tctx.restore();
+}
+
 const camCanvas = document.createElement('canvas');
 export function drawCamera(ctx, camVideo, cam, W, H) {
   if (!cam || !cam.show || !camVideo || camVideo.readyState < 2) return;
@@ -333,7 +366,7 @@ export function drawCamera(ctx, camVideo, cam, W, H) {
   // 离屏画一份裁好的画面(cover 裁切 + 镜像 + 美颜),再整体贴回主画布
   const tw = Math.max(2, Math.round(r.w)), th = Math.max(2, Math.round(r.h));
   camCanvas.width = tw; camCanvas.height = th;
-  const tctx = camCanvas.getContext('2d');
+  const tctx = camCanvas.getContext('2d', { willReadFrequently: true });
   const vw = camVideo.videoWidth, vh = camVideo.videoHeight;
   const s = Math.max(tw / vw, th / vh);
   tctx.save();
@@ -344,13 +377,9 @@ export function drawCamera(ctx, camVideo, cam, W, H) {
   if (cam.blurBg && segmenter) {
     try { applyBgBlur(camCanvas, tctx, tw, th); } catch (e) { /* 单帧失败不打断渲染 */ }
   }
-  // 美颜 = 柔焦磨皮:把轻度模糊 + 提亮的同画面半透明叠回去,肤色变平滑、五官轮廓仍清晰
+  // 美颜 = 边缘保护磨皮(surface blur):只抹平皮肤纹理,眼睛/轮廓/发丝保持锐利
   if (cam.beauty > 0) {
-    tctx.save();
-    tctx.filter = `blur(${((1.5 + 3.5 * cam.beauty) * tw / 240).toFixed(2)}px) brightness(1.06) saturate(1.05)`;
-    tctx.globalAlpha = 0.35 + 0.4 * cam.beauty;
-    tctx.drawImage(camCanvas, 0, 0);
-    tctx.restore();
+    try { applyBeauty(tctx, tw, th, cam.beauty); } catch (e) { /* 单帧失败不打断渲染 */ }
   }
   // 投影
   ctx.save();
