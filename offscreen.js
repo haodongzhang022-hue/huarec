@@ -7,6 +7,15 @@ import { fixWebmDuration } from './lib/vendor/fix-webm-duration.mjs';
 let recorder = null;
 let stream = null;
 let audioCtx = null;
+// 跨标签页接力:MediaRecorder 不直接录 tabCapture 流,而是录一条恒定的「中转轨」——
+// 视频帧经 MediaStreamTrackProcessor 读出、写进 MediaStreamTrackGenerator,音频混进固定的
+// AudioDestination。切标签页 = 换上游,录制器全程无感,成片是一条连续视频。
+const canRelay = typeof MediaStreamTrackGenerator !== 'undefined' && typeof MediaStreamTrackProcessor !== 'undefined';
+let videoGen = null, genWriter = null, audioDest = null;
+let curSrcNode = null;
+let pumpId = 0;       // 递增代号:旧泵在下一帧发现代号变了就自杀
+let hasAudioOpt = false;
+let firstVp = null;   // 首个标签页的视口:全程锁同一套捕获约束,接力时帧尺寸不跳
 let startTime = 0;
 let pausedTotal = 0; // 累计暂停时长(ms),不计入录像时长
 let pausedAt = 0;
@@ -55,41 +64,80 @@ function pickMime() {
   return 'video/webm';
 }
 
+// 取某个标签页的 tabCapture 流。约束全程用 firstVp(首页视口):
+// 黑边根治:tabCapture 的捕获帧若用默认比例,会把比例不同的网页 letterbox(黑边烤进像素)。
+// 只设上限(maxWidth/maxHeight),且其宽高比 = 视口宽高比 → 内容按比例填满捕获帧。
+// 不用 min=精确锁(易触发 OverconstrainedError 反而退回默认宽帧 → 又冒黑边)。
+async function captureTab(streamId) {
+  const mandatory = { chromeMediaSource: 'tab', chromeMediaSourceId: streamId, maxFrameRate: 30 };
+  if (firstVp && firstVp.w && firstVp.h) {
+    mandatory.maxWidth = firstVp.w; mandatory.maxHeight = firstVp.h;
+  }
+  const audio = hasAudioOpt
+    ? { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } }
+    : false;
+  try {
+    return await navigator.mediaDevices.getUserMedia({ video: { mandatory }, audio });
+  } catch (e) {
+    const loose = { chromeMediaSource: 'tab', chromeMediaSourceId: streamId, maxFrameRate: 30 };
+    return navigator.mediaDevices.getUserMedia({ video: { mandatory: loose }, audio });
+  }
+}
+
+// 把一个标签页流接上中转轨(首次接入和切换共用)。旧上游停掉,新上游开泵。
+function plugTab(s) {
+  const my = ++pumpId;
+  const track = s.getVideoTracks()[0];
+  const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+  (async () => {
+    while (true) {
+      let r;
+      try { r = await reader.read(); } catch (_) { break; }
+      if (r.done) break;
+      if (pumpId !== my) { r.value.close(); break; }
+      try { await genWriter.write(r.value); } catch (_) { r.value.close(); break; }
+    }
+    try { reader.cancel(); } catch (_) {}
+  })();
+  let srcNode = null;
+  if (hasAudioOpt && audioCtx && s.getAudioTracks().length) {
+    srcNode = audioCtx.createMediaStreamSource(s);
+    if (audioDest) srcNode.connect(audioDest);     // 进录制混音
+    srcNode.connect(audioCtx.destination);          // 回连扬声器,录制期间听得见
+  }
+  if (curSrcNode) { try { curSrcNode.disconnect(); } catch (_) {} }
+  if (stream && stream !== s) stream.getTracks().forEach((t) => t.stop());
+  stream = s; curSrcNode = srcNode;
+}
+
 async function start(streamId, options) {
   session = 'sess_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
   seqs.screen = 0; seqs.cam = 0; seqs.mic = 0; writeChain = Promise.resolve();
   startTime = 0; camStartTime = 0; micStartTime = 0;
-  // 黑边根治:tabCapture 的捕获帧若用默认比例,会把比例不同的网页 letterbox(黑边烤进像素)。
-  // 这里用 background 测得的【视口真实设备像素】把捕获盒子锁成和网页一模一样的比例和尺寸 →
-  // 内容刚好填满捕获帧,不留黑边。拿不到视口尺寸时退回只限帧率(不强加任何固定比例)。
-  // 只设上限(maxWidth/maxHeight),且其宽高比 = 视口宽高比:只要这个比例对,无论绝对分辨率
-  // 被缩到多少,内容都按比例填满捕获帧,不会 letterbox 出黑边。不用 min=精确锁(易触发
-  // OverconstrainedError 反而退回无约束的默认宽帧 → 又冒黑边)。
-  const vp = options.viewport;
-  const mandatory = { chromeMediaSource: 'tab', chromeMediaSourceId: streamId, maxFrameRate: 30 };
-  if (vp && vp.w && vp.h) {
-    mandatory.maxWidth = vp.w; mandatory.maxHeight = vp.h;
-  }
-  const audio = options.audio !== false
-    ? { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } }
-    : false;
+  hasAudioOpt = options.audio !== false;
+  firstVp = options.viewport || null;
 
-  // 先试带视口比例上限的约束;万一仍被拒,退回只限帧率保证能录上(极端兜底)。
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { mandatory }, audio });
-  } catch (e) {
-    const loose = { chromeMediaSource: 'tab', chromeMediaSourceId: streamId, maxFrameRate: 30 };
-    stream = await navigator.mediaDevices.getUserMedia({ video: { mandatory: loose }, audio });
-  }
-
-  // 把标签页音频回连到扬声器,否则录制期间用户听不到声音
-  if (audio) {
+  const tabStream = await captureTab(streamId);
+  let recStream;
+  if (canRelay) {
+    videoGen = new MediaStreamTrackGenerator({ kind: 'video' });
+    genWriter = videoGen.writable.getWriter();
     audioCtx = new AudioContext();
-    const src = audioCtx.createMediaStreamSource(stream);
-    src.connect(audioCtx.destination);
+    audioDest = hasAudioOpt ? audioCtx.createMediaStreamDestination() : null;
+    recStream = new MediaStream([videoGen]);
+    if (audioDest) audioDest.stream.getAudioTracks().forEach((t) => recStream.addTrack(t));
+    plugTab(tabStream);
+  } else {
+    // 老环境兜底:直接录 tabCapture 流(不支持跨标签页接力)
+    recStream = tabStream;
+    stream = tabStream;
+    if (hasAudioOpt) {
+      audioCtx = new AudioContext();
+      audioCtx.createMediaStreamSource(tabStream).connect(audioCtx.destination);
+    }
   }
 
-  const vset = stream.getVideoTracks()[0].getSettings();
+  const vset = tabStream.getVideoTracks()[0].getSettings();
   meta = {
     width: vset.width || 1280,
     height: vset.height || 720,
@@ -145,7 +193,7 @@ async function start(streamId, options) {
   // 码率随分辨率自适应:普通屏保持 8Mbps,Retina(2880×1800 等)按 0.12 bit/px/帧 拉高到上限 24M,
   // 否则高分辨率下 8M 会让滚动/弹窗等运动场景糊掉(0.051 bit/px/帧 远低于 VP9 推荐)。
   const vbps = Math.max(8_000_000, Math.min(24_000_000, Math.round(meta.width * meta.height * 30 * 0.12)));
-  recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: vbps });
+  recorder = new MediaRecorder(recStream, { mimeType, videoBitsPerSecond: vbps });
   meta.mime = mimeType;
 
   recorder.ondataavailable = (e) => { if (e.data && e.data.size) pushChunk('screen', e.data); };
@@ -217,11 +265,14 @@ async function onStop() {
 }
 
 function cleanup() {
+  pumpId++; // 让在跑的帧泵退出
+  if (genWriter) { try { genWriter.close().catch(() => {}); } catch (_) {} }
   if (stream) stream.getTracks().forEach((t) => t.stop());
   if (camStream) camStream.getTracks().forEach((t) => t.stop());
   if (micStream) micStream.getTracks().forEach((t) => t.stop());
   if (audioCtx) audioCtx.close().catch(() => {});
   stream = null; audioCtx = null; recorder = null;
+  videoGen = null; genWriter = null; audioDest = null; curSrcNode = null;
   camStream = null; camRecorder = null; camStopped = null;
   micStream = null; micRecorder = null; micStopped = null;
 }
@@ -245,6 +296,15 @@ chrome.runtime.onMessage.addListener((msg) => {
       if (camRecorder && camRecorder.state === 'paused') camRecorder.resume();
       if (micRecorder && micRecorder.state === 'paused') micRecorder.resume();
       reply('OFFSCREEN_RESUMED');
+      break;
+    case 'OFFSCREEN_SWITCH':
+      // 跨标签页接力:对新标签页取流,换到中转轨上游;失败则保持录原页
+      (async () => {
+        if (!canRelay || !videoGen) throw new Error('当前环境不支持跨标签页接力');
+        plugTab(await captureTab(msg.streamId));
+      })()
+        .then(() => reply('OFFSCREEN_SWITCHED'))
+        .catch((e) => reply('OFFSCREEN_SWITCHED', { error: e.message }));
       break;
     case 'OFFSCREEN_STOP':
       if (recorder && recorder.state !== 'inactive') recorder.stop();

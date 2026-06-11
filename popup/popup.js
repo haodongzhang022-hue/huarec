@@ -77,6 +77,13 @@ async function init() {
   setView(st || { status: 'idle' });
 
   $('start').addEventListener('click', start);
+  $('switchHere').addEventListener('click', async () => {
+    const r = await chrome.runtime.sendMessage({ type: 'SWITCH_RECORDING' }).catch(() => null);
+    if (r && r.ok) { window.close(); return; }
+    const err = $('error');
+    err.hidden = false;
+    err.textContent = r?.error || '切换失败,请重试';
+  });
   $('stop').addEventListener('click', () => stop(false));
   $('stopDl').addEventListener('click', () => stop(true));
   $('pause').addEventListener('click', togglePause);
@@ -98,6 +105,14 @@ function setView(st) {
   $('idle').hidden = live;
   $('live').hidden = !live;
   if (!live) { stopTimer(); return; }
+
+  // 当前标签页 ≠ 被录标签页 → 提供手动接力按钮(自动接力被 Chrome 拒绝时的兜底)
+  $('switchHere').hidden = true;
+  if (status !== 'saving' && st.tabId) {
+    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+      if (tab && tab.id !== st.tabId && /^(https?|file):/i.test(tab.url || '')) $('switchHere').hidden = false;
+    });
+  }
 
   const paused = status === 'paused';
   const saving = status === 'saving';

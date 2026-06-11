@@ -266,6 +266,58 @@ async function stopRecording(opts = {}) {
   return { ok: true, id: stopped.id };
 }
 
+// ---- 跨标签页接力 ----
+// 把录制切到另一个标签页:offscreen 换上游 → 旧页追踪器收尾 → 新页注入接续(同一时间轴)。
+let switching = false;
+async function switchToTab(tabId) {
+  const st = await getState();
+  if (st.status !== 'recording' && st.status !== 'paused') return { ok: false, error: '没有进行中的录制' };
+  if (tabId === st.tabId) return { ok: true };
+  if (switching) return { ok: false, error: '正在切换中,稍等' };
+  switching = true;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!canCapture(tab.url)) return { ok: false, error: '这个页面无法录制(chrome:// 等特殊页面)' };
+    const streamId = await getStreamId(tabId, 1);
+    const resp = await askOffscreen({ type: 'OFFSCREEN_SWITCH', streamId }, 'OFFSCREEN_SWITCHED');
+    if (resp.error) return { ok: false, error: friendlyCaptureError(resp.error) };
+    if (st.tabId) {
+      try {
+        const d = await chrome.tabs.sendMessage(st.tabId, { type: 'REQUEST_TRACK' });
+        if (d) await appendTrack(d);
+      } catch (_) {}
+      chrome.tabs.sendMessage(st.tabId, { type: 'REC_TEARDOWN' }).catch(() => {});
+    }
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['content/tracker.js'] });
+      await chrome.tabs.sendMessage(tabId, {
+        type: 'REC_START', startTime: st.startTime, pausedTotal: st.pausedTotal || 0,
+        paused: st.status === 'paused', pausedAt: st.pausedAt || 0,
+        enhanceCursor: st.options?.enhanceCursor !== false,
+        hideCursor: st.options?.smoothCursor === true,
+      });
+    } catch (e) { console.warn('新页注入追踪器失败:', e.message); }
+    await setState({ tabId });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: friendlyCaptureError(e.message) };
+  } finally {
+    switching = false;
+  }
+}
+
+// 录制中用户切换了标签页 → 自动接力跟过去。
+// Chrome 对「没在上面点过扩展」的标签页可能拒绝取流:失败就保持录原页,
+// 角标变 ⇄ 提示,在新页上打开 HuaRec 弹窗点「切到当前页」即可手动接力(弹窗即授权)。
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  const st = await getState();
+  if (st.status !== 'recording' && st.status !== 'paused') return;
+  if (tabId === st.tabId) return;
+  const r = await switchToTab(tabId);
+  if (r.ok) chrome.action.setBadgeText({ text: st.status === 'paused' ? 'II' : 'REC' });
+  else chrome.action.setBadgeText({ text: '⇄' });
+});
+
 async function teardown(tabId) {
   if (tabId) chrome.tabs.sendMessage(tabId, { type: 'REC_TEARDOWN' }).catch(() => {});
   await closeOffscreen();
@@ -303,6 +355,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
     case 'GET_STATE':
       getState().then(sendResponse);
+      return true;
+    case 'SWITCH_RECORDING':
+      // popup 手动接力:用户在新标签页上打开了弹窗(=完成扩展授权),取流必成
+      chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+        if (!tab) return sendResponse({ ok: false, error: '找不到当前标签页' });
+        switchToTab(tab.id).then(sendResponse);
+      });
       return true;
     case 'TRACK_FLUSH':
       // 只收被录标签页的增量(防其他页面残留的旧 tracker 串数据)
