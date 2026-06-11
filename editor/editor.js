@@ -1,5 +1,5 @@
 import { BACKGROUNDS, getSkin, getBackground } from '../lib/presets.js';
-import { drawScene, buildZoomSegments, preloadBackground, drawCamera, cameraRect, zoomAt } from './render.js';
+import { drawScene, buildZoomSegments, preloadBackground, drawCamera, cameraRect, zoomAt, initSegmenter, segmenterReady } from './render.js';
 import {
   getRecording, listRecordings, deleteRecording, saveRecording,
   getProject, saveProject, getAllProjects,
@@ -33,6 +33,7 @@ let proj = null, projTimer = null;              // 本段录制的编辑工程(�
 let micBlob = null, micAudio = null, micOffset = 0; // 麦克风轨:独立 audio 元素同步预览,导出时混音
 let prefsSnapshot = {};                         // 打开时的全局偏好快照:平滑光标录制不把 cursor=true 写回污染普通录制
 let zoomSel = null;                             // 选中的运镜段(对象引用,排序后不失效)
+let exportAR = 'orig';                          // 画布比例:orig / 9:16 / 1:1 / 4:5(竖屏分发,预览即所得)
 let tabVol = 1, micVol = 1;                     // 混音音量(0~1.5);预览端 element.volume 只能到 1,超出部分导出生效
 
 const id = new URLSearchParams(location.search).get('id');
@@ -168,7 +169,7 @@ async function loadEditor(recId) {
     if (kept.length) segments = kept;
   }
 
-  data = { cursor: rec.cursor || [], clicks: rec.clicks || [], acts: rec.acts || [], zoomSegs: buildZoomSegments(rec.clicks || []) };
+  data = { cursor: rec.cursor || [], clicks: rec.clicks || [], acts: rec.acts || [], keys: rec.keys || [], zoomSegs: buildZoomSegments(rec.clicks || []) };
   // 运镜段可编辑:工程里存过就用工程的(点击自动生成的只是初始值)
   if (Array.isArray(proj.zoomSegs)) {
     data.zoomSegs = proj.zoomSegs.filter((s) => s && s.end > s.start && Array.isArray(s.points) && s.points.length);
@@ -192,8 +193,10 @@ async function loadEditor(recId) {
       background: getBackground(pc.background), padding: pc.padding, radius: pc.radius, shadow: pc.shadow,
       accent: cfg.accent, clickFx: pc.clickFx, cursor: pc.cursor, autoZoom: pc.autoZoom, zoomLevel: pc.zoomLevel,
       cursorSize: pc.cursorSize ?? cfg.cursorSize, cursorSmooth: pc.cursorSmooth ?? cfg.cursorSmooth,
+      keyFx: pc.keyFx ?? cfg.keyFx,
     };
   }
+  exportAR = proj.exportAR || 'orig';
   if (typeof proj.beautify === 'boolean') beautify = proj.beautify;
   document.querySelectorAll('#beautifySeg button').forEach((b) => b.classList.toggle('on', b.dataset.b === (beautify ? '1' : '0')));
   preloadBackground(cfg.background); // 壁纸解码完成后帧循环自然画上
@@ -210,7 +213,8 @@ async function loadEditor(recId) {
     camDur = isFinite(camVideo.duration) && camVideo.duration > 0 ? camVideo.duration * 1000 : videoDur;
     camOffset = recMeta.camOffsetMs || 0;
     // 配置优先级:本段工程 > 全局偏好 > 默认;show 只存在工程里(藏不藏是对这一段的决定)
-    camCfg = { x: 0.86, y: 0.82, size: 0.24, shape: 'circle', beauty: 0.4, mirror: true, ring: true, show: true, ...(savedCamPrefs || {}), ...(proj.camCfg || {}) };
+    camCfg = { x: 0.86, y: 0.82, size: 0.24, shape: 'circle', beauty: 0.4, mirror: true, ring: true, blurBg: false, show: true, ...(savedCamPrefs || {}), ...(proj.camCfg || {}) };
+    if (camCfg.blurBg) initSegmenter(); // 上次开着虚化:提前预热本地分割模型
     syncCam(true);
     bindCamControls(); syncCamControls();
   }
@@ -228,6 +232,9 @@ async function loadEditor(recId) {
   buildBgChips(); markBg(cfg.background.id);
   bindSegments(); bindControls(); bindTransport(); bindTimeline(); bindZoomControls(); bindKeys();
   syncBeautifyUI();
+  // 恢复画布比例(竖屏/方形),并同步顶栏分段器选中态
+  document.querySelectorAll('#arSeg button').forEach((b) => b.classList.toggle('on', b.dataset.ar === exportAR));
+  if (exportAR !== 'orig') applyAspect();
   recompute(); syncControls(); render(); syncTimeline();
   requestAnimationFrame(frame);
   if (!proj.poster) makePoster(); // 录制库封面,只生成一次
@@ -254,8 +261,9 @@ function scheduleProjectSave() {
     proj.cfg = {
       background: cfg.background.id, padding: cfg.padding, radius: cfg.radius, shadow: cfg.shadow,
       clickFx: cfg.clickFx, cursor: cfg.cursor, autoZoom: cfg.autoZoom, zoomLevel: cfg.zoomLevel,
-      cursorSize: cfg.cursorSize, cursorSmooth: cfg.cursorSmooth,
+      cursorSize: cfg.cursorSize, cursorSmooth: cfg.cursorSmooth, keyFx: cfg.keyFx,
     };
+    proj.exportAR = exportAR;
     proj.zoomSegs = data.zoomSegs.map((s) => ({ start: s.start, end: s.end, level: s.level, points: s.points.map((p) => ({ ...p })) }));
     proj.camCfg = camCfg ? { ...camCfg } : null;
     proj.audio = { tabVol, micVol };
@@ -279,14 +287,14 @@ function makePoster() {
 async function loadPrefs() { const { editorPrefs } = await chrome.storage.local.get('editorPrefs'); return editorPrefs || {}; }
 function savePrefs() {
   const camera = camCfg
-    ? { x: camCfg.x, y: camCfg.y, size: camCfg.size, shape: camCfg.shape, beauty: camCfg.beauty, mirror: camCfg.mirror, ring: camCfg.ring }
+    ? { x: camCfg.x, y: camCfg.y, size: camCfg.size, shape: camCfg.shape, beauty: camCfg.beauty, mirror: camCfg.mirror, ring: camCfg.ring, blurBg: camCfg.blurBg }
     : savedCamPrefs;
   // 平滑光标录制里 cursor 必然是 true、smooth 必然非 0,这俩不回写全局(否则普通录制会冒出双光标)
   const hidden = !!recMeta.hiddenCursor;
   chrome.storage.local.set({ editorPrefs: {
     skinId: currentSkinId, padding: cfg.padding, radius: cfg.radius, shadow: cfg.shadow,
     background: cfg.background.id, autoZoom: cfg.autoZoom, zoomLevel: cfg.zoomLevel,
-    clickFx: cfg.clickFx,
+    clickFx: cfg.clickFx, keyFx: cfg.keyFx,
     cursor: hidden ? (prefsSnapshot.cursor ?? false) : cfg.cursor,
     cursorSmooth: hidden ? prefsSnapshot.cursorSmooth : cfg.cursorSmooth,
     cursorSize: cfg.cursorSize, camera,
@@ -305,6 +313,7 @@ function applySkin(skin, prefs = {}) {
     shadow: prefs.shadow ?? skin.shadow,
     accent: skin.accent,
     clickFx: prefs.clickFx ?? skin.clickFx,
+    keyFx: prefs.keyFx ?? true,
     cursor: hidden ? true : (prefs.cursor ?? false),
     cursorSize: prefs.cursorSize ?? 1,
     cursorSmooth: prefs.cursorSmooth ?? (hidden ? 120 : 0),
@@ -371,6 +380,22 @@ function setSpeedRange(a, b, sp) {
     else merged.push({ ...s });
   }
   segments = merged;
+}
+
+// ---- 画布比例(竖屏/方形分发) ----
+// 改的是预览+导出共用的画布尺寸:所见即所得。卡片在 drawScene 里按视频比例 contain 居中,
+// 摄像头气泡坐标是画布归一化的,切比例后自动跟着重排。
+function applyAspect() {
+  const bw = (video.videoWidth || recMeta.width || 1280) & ~1;
+  const bh = (video.videoHeight || recMeta.height || 720) & ~1;
+  let w = bw, h = bh;
+  if (exportAR === '9:16') { h = bh; w = Math.round(bh * 9 / 16 / 2) * 2; }
+  else if (exportAR === '1:1') { w = bh; h = bh; }
+  else if (exportAR === '4:5') { h = bh; w = Math.round(bh * 4 / 5 / 2) * 2; }
+  W = w; H = h;
+  canvas.width = W; canvas.height = H;
+  if (camCfg) clampCam();
+  render();
 }
 
 // ---- 渲染 ----
@@ -475,7 +500,9 @@ function makeBox(cls, left, width) { const d = document.createElement('div'); d.
 // 生成胶片缩略图(看得见在剪哪一段)。会临时 seek 视频,完成后跳回 playSrc。
 async function buildFilmstrip() {
   // 帧数随时长加密:短片 14 帧够,长片到 24 帧(更密则首屏 seek 太慢,不值)
-  const N = Math.min(24, Math.max(14, Math.floor(videoDur / 4000))), tw = 160, th = Math.max(2, Math.round(160 * H / W));
+  // 缩略图比例跟视频本身走(画布可能已切成竖屏/方形,但胶片画的是原始视频帧)
+  const VW2 = video.videoWidth || W, VH2 = video.videoHeight || H;
+  const N = Math.min(24, Math.max(14, Math.floor(videoDur / 4000))), tw = 160, th = Math.max(2, Math.round(160 * VH2 / VW2));
   const strip = document.createElement('canvas'); strip.width = tw * N; strip.height = th;
   const sctx = strip.getContext('2d');
   for (let i = 0; i < N; i++) {
@@ -576,13 +603,18 @@ function selectZoom(seg) {
   syncTimeline();
 }
 
-// 预览画布坐标 → 视频源归一化坐标(复刻 drawScene 的留白与运镜裁剪几何)
+// 预览画布坐标 → 视频源归一化坐标(复刻 drawScene 的留白/contain 与运镜裁剪几何)
 function canvasToSource(e) {
   const r = canvas.getBoundingClientRect();
   const px = (e.clientX - r.left) / r.width * W, py = (e.clientY - r.top) / r.height * H;
   const c = curCfg();
   const padX = c.padding * W, padY = c.padding * H;
-  const rx = padX, ry = padY, rw = W - padX * 2, rh = H - padY * 2;
+  const availW = W - padX * 2, availH = H - padY * 2;
+  const VA = (video.videoWidth || W) / (video.videoHeight || H);
+  let rx, ry, rw, rh;
+  if (Math.abs(availW / availH - VA) < 0.005) { rx = padX; ry = padY; rw = availW; rh = availH; }
+  else if (availW / availH > VA) { rh = availH; rw = rh * VA; rx = (W - rw) / 2; ry = padY; }
+  else { rw = availW; rh = rw / VA; rx = padX; ry = (H - rh) / 2; }
   if (px < rx || px > rx + rw || py < ry || py > ry + rh) return null;
   const VW = video.videoWidth || W, VH = video.videoHeight || H;
   const z = c.autoZoom ? zoomAt(data.zoomSegs, video.currentTime * 1000, c.zoomLevel) : { scale: 1, fx: 0.5, fy: 0.5 };
@@ -796,6 +828,7 @@ function bindSegments() {
   wireSeg('beautifySeg', (v) => { beautify = v === '1'; syncBeautifyUI(); render(); scheduleProjectSave(); });
   wireSeg('fmtSeg', (v) => { fmtSel = v; }, 'fmt');
   wireSeg('sizeSeg', (v) => { exportSize = v; }, 'sz');
+  wireSeg('arSeg', (v) => { exportAR = v; applyAspect(); scheduleProjectSave(); }, 'ar');
 }
 function wireSeg(segId, fn, attr = 'b') {
   const seg = $(segId);
@@ -841,6 +874,7 @@ function bindControls() {
   on('autoZoom', 'change', (e) => { cfg.autoZoom = e.target.checked; rr(); });
   on('zoomLevel', 'input', (e) => { cfg.zoomLevel = +e.target.value / 100; $('vZoom').textContent = (cfg.zoomLevel).toFixed(2) + '×'; rr(); });
   on('clickFx', 'change', (e) => { cfg.clickFx = e.target.checked; rr(); });
+  on('keyFx', 'change', (e) => { cfg.keyFx = e.target.checked; rr(); });
   on('cursorOn', 'change', (e) => { cfg.cursor = e.target.checked; rr(); });
   on('cursorSize', 'input', (e) => { cfg.cursorSize = +e.target.value / 100; $('vCurSize').textContent = e.target.value; rr(); });
   on('cursorSmooth', 'input', (e) => { cfg.cursorSmooth = +e.target.value; $('vCurSmooth').textContent = e.target.value; rr(); });
@@ -853,6 +887,7 @@ function syncControls() {
   $('autoZoom').checked = cfg.autoZoom;
   $('zoomLevel').value = Math.round(cfg.zoomLevel * 100); $('vZoom').textContent = cfg.zoomLevel.toFixed(2) + '×';
   $('clickFx').checked = cfg.clickFx;
+  $('keyFx').checked = !!cfg.keyFx;
   $('cursorOn').checked = !!cfg.cursor;
   $('cursorSize').value = Math.round(cfg.cursorSize * 100); $('vCurSize').textContent = Math.round(cfg.cursorSize * 100);
   $('cursorSmooth').value = cfg.cursorSmooth; $('vCurSmooth').textContent = cfg.cursorSmooth;
@@ -871,6 +906,15 @@ function bindCamControls() {
   $('camBeauty').addEventListener('input', (e) => { paintRange(e.target); camCfg.beauty = +e.target.value / 100; $('vCamBeauty').textContent = e.target.value; rr(); });
   $('camMirror').onchange = (e) => { camCfg.mirror = e.target.checked; rr(); };
   $('camRing').onchange = (e) => { camCfg.ring = e.target.checked; rr(); };
+  $('camBlur').onchange = async (e) => {
+    camCfg.blurBg = e.target.checked;
+    if (camCfg.blurBg && !segmenterReady()) {
+      $('camBlurInfo').textContent = '正在加载本地人像分割模型…';
+      await initSegmenter();
+      $('camBlurInfo').textContent = segmenterReady() ? '' : '模型加载失败,虚化暂不可用(画面保持原样)';
+    }
+    rr();
+  };
   bindCamDrag();
 }
 function syncCamControls() {
@@ -878,6 +922,7 @@ function syncCamControls() {
   $('camSize').value = Math.round(camCfg.size * 100); $('vCamSize').textContent = Math.round(camCfg.size * 100);
   $('camBeauty').value = Math.round(camCfg.beauty * 100); $('vCamBeauty').textContent = Math.round(camCfg.beauty * 100);
   $('camMirror').checked = camCfg.mirror; $('camRing').checked = camCfg.ring;
+  $('camBlur').checked = !!camCfg.blurBg;
   document.querySelectorAll('#camShapeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.shape === camCfg.shape));
   paintRange($('camSize')); paintRange($('camBeauty'));
 }

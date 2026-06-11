@@ -18,6 +18,12 @@
       <div class="brand"><img src="../icons/icon48.png" width="22" height="22" alt="" /> HuaRec <em>花录</em></div>
       <div class="tb-right">
         <button id="downloadRaw" class="btn-ghost" title="下载未加工的原始录像(不含美化)">↓ 源片</button>
+        <div class="seg small" id="arSeg" title="画布比例:竖屏/方形适配小红书、视频号、抖音">
+          <button data-ar="orig" class="on">原始</button>
+          <button data-ar="9:16">9:16</button>
+          <button data-ar="1:1">1:1</button>
+          <button data-ar="4:5">4:5</button>
+        </div>
         <div class="seg small" id="sizeSeg" title="导出尺寸(越小文件越小)">
           <button data-sz="orig" class="on">原尺寸</button>
           <button data-sz="1080">1080p</button>
@@ -113,6 +119,7 @@
           <label class="sw"><span class="lbl">跟随点击自动放大<span class="sub">点击处平滑推近,像 Screen Studio</span></span><input type="checkbox" id="autoZoom" /><span class="track-sw"></span></label>
           <label class="row"><span>倍数</span><input id="zoomLevel" type="range" min="100" max="250" /><span class="val" id="vZoom"></span></label>
           <label class="sw"><span class="lbl">点击波纹<span class="sub">点击处珊瑚色扩散环</span></span><input type="checkbox" id="clickFx" /><span class="track-sw"></span></label>
+          <label class="sw"><span class="lbl">按键浮层<span class="sub">显示按下的快捷键(只记组合键,不记打字内容)</span></span><input type="checkbox" id="keyFx" /><span class="track-sw"></span></label>
           <label class="sw"><span class="lbl">补画光标<span class="sub">录像里没有鼠标时,叠一个干净光标</span></span><input type="checkbox" id="cursorOn" /><span class="track-sw"></span></label>
           <label class="row"><span>光标大小</span><input id="cursorSize" type="range" min="70" max="200" /><span class="val" id="vCurSize"></span></label>
           <label class="row"><span>光标平滑</span><input id="cursorSmooth" type="range" min="0" max="300" step="10" /><span class="val" id="vCurSmooth"></span></label>
@@ -139,6 +146,8 @@
           <label class="row"><span>美颜</span><input id="camBeauty" type="range" min="0" max="100" /><span class="val" id="vCamBeauty"></span></label>
           <label class="sw"><span class="lbl">镜像<span class="sub">和照镜子一致(自拍习惯)</span></span><input type="checkbox" id="camMirror" /><span class="track-sw"></span></label>
           <label class="sw"><span class="lbl">白色描边</span><input type="checkbox" id="camRing" /><span class="track-sw"></span></label>
+          <label class="sw"><span class="lbl">背景虚化<span class="sub">本地人像分割,人清晰、房间变模糊,不联网</span></span><input type="checkbox" id="camBlur" /><span class="track-sw"></span></label>
+          <p class="gdesc" id="camBlurInfo"></p>
         </div>
 
         <div class="group" id="gAudio" hidden>

@@ -1,5 +1,63 @@
 // 渲染引擎:预览与导出共用。纯函数式,绘制单帧到 canvas。
 // 坐标约定:光标/点击均为 0..1 归一化(相对录制时的视口)。
+import { FilesetResolver, ImageSegmenter } from '../lib/vendor/mediapipe/vision_bundle.mjs';
+
+// ---- 人像分割(背景虚化用):MediaPipe 自拍分割,模型打包在扩展里,本地运行不联网 ----
+let segmenter = null, segLoading = null, segTs = 0;
+export function initSegmenter() {
+  if (segLoading) return segLoading;
+  segLoading = (async () => {
+    try {
+      const base = chrome.runtime.getURL('lib/vendor/mediapipe');
+      const fileset = await FilesetResolver.forVisionTasks(base);
+      segmenter = await ImageSegmenter.createFromOptions(fileset, {
+        baseOptions: { modelAssetPath: base + '/selfie_segmenter.tflite', delegate: 'GPU' },
+        runningMode: 'VIDEO',
+        outputConfidenceMasks: true,
+      });
+    } catch (e) {
+      console.warn('人像分割初始化失败,背景虚化不可用:', e.message);
+      segmenter = null;
+    }
+  })();
+  return segLoading;
+}
+export function segmenterReady() { return !!segmenter; }
+
+// 背景虚化:人像(置信度蒙版)保留清晰,背景整体高斯模糊。
+// 在气泡分辨率的离屏画布上做,代价随气泡尺寸走,预览和导出都扛得住。
+const maskCanvas = document.createElement('canvas');
+const personCanvas = document.createElement('canvas');
+function applyBgBlur(src, sctx, tw, th) {
+  segTs = Math.max(segTs + 1, performance.now()); // segmentForVideo 要求时间戳单调递增
+  const res = segmenter.segmentForVideo(src, segTs);
+  const mask = res.confidenceMasks && res.confidenceMasks[0];
+  if (!mask) return;
+  try {
+    const mw = mask.width, mh = mask.height;
+    const arr = mask.getAsFloat32Array();
+    maskCanvas.width = mw; maskCanvas.height = mh;
+    const mctx = maskCanvas.getContext('2d');
+    const img = mctx.createImageData(mw, mh);
+    for (let i = 0; i < arr.length; i++) img.data[i * 4 + 3] = arr[i] * 255;
+    mctx.putImageData(img, 0, 0);
+    // 人像 = 原画 ∩ 蒙版
+    personCanvas.width = tw; personCanvas.height = th;
+    const pctx = personCanvas.getContext('2d');
+    pctx.drawImage(src, 0, 0);
+    pctx.globalCompositeOperation = 'destination-in';
+    pctx.drawImage(maskCanvas, 0, 0, tw, th);
+    pctx.globalCompositeOperation = 'source-over';
+    // 背景整体模糊,再把清晰人像贴回
+    sctx.save();
+    sctx.filter = `blur(${Math.max(6, tw / 24).toFixed(1)}px)`;
+    sctx.drawImage(src, 0, 0);
+    sctx.restore();
+    sctx.drawImage(personCanvas, 0, 0);
+  } finally {
+    mask.close();
+  }
+}
 
 export function smoothstep(e) { e = Math.max(0, Math.min(1, e)); return e * e * (3 - 2 * e); }
 
@@ -114,14 +172,23 @@ export function drawScene(ctx, video, videoTimeMs, cfg, data, W, H) {
   paintBackground(ctx, cfg.background, W, H);
 
   // 视频卡片矩形(留白内缩)。
-  // 关键:左右留白用 W 的比例、上下用 H 的比例,分轴计算 → 卡片 aspect 严格等于
-  // 画布(=视频)aspect,drawImage 整帧映射不变形。若两轴共用 min(W,H) 会破坏宽高比 → 横向拉伸。
+  // 画布与视频同比例时:左右留白用 W 的比例、上下用 H 的比例,分轴计算,卡片 aspect == 视频 aspect。
+  // 画布比例不同(竖屏 9:16 / 方形导出):卡片按视频宽高比 contain 居中,多出的方向交给壁纸。
   const padX = cfg.padding * W, padY = cfg.padding * H;
-  const rx = padX, ry = padY, rw = W - padX * 2, rh = H - padY * 2;
-  const radius = (cfg.padding > 0 ? cfg.radius : 0) * k;
+  const availW = W - padX * 2, availH = H - padY * 2;
+  const VA = (video.videoWidth || W) / (video.videoHeight || H);
+  let rx, ry, rw, rh;
+  if (Math.abs(availW / availH - VA) < 0.005) {
+    rx = padX; ry = padY; rw = availW; rh = availH;
+  } else if (availW / availH > VA) {
+    rh = availH; rw = rh * VA; rx = (W - rw) / 2; ry = padY;
+  } else {
+    rw = availW; rh = rw / VA; rx = padX; ry = (H - rh) / 2;
+  }
+  const radius = (cfg.padding > 0 || rw < W - 1 || rh < H - 1 ? cfg.radius : 0) * k;
 
-  // 阴影
-  if (cfg.shadow > 0 && cfg.padding > 0) {
+  // 阴影(留白>0 或竖屏构图下卡片未铺满时生效)
+  if (cfg.shadow > 0 && (cfg.padding > 0 || rw < W - 1 || rh < H - 1)) {
     ctx.save();
     ctx.shadowColor = `rgba(0,0,0,${0.5 * cfg.shadow})`;
     ctx.shadowBlur = 70 * cfg.shadow * k;
@@ -184,6 +251,41 @@ export function drawScene(ctx, video, videoTimeMs, cfg, data, W, H) {
     }
   }
 
+  // 按键浮层:最近按下的快捷键画成 macOS 风按键牌,卡片底部居中,1.1s 后淡出
+  if (cfg.keyFx && data.keys && data.keys.length) {
+    const act = [];
+    for (const kk of data.keys) {
+      const age = videoTimeMs - kk.t;
+      if (age >= 0 && age < 1400) act.push({ label: kk.label, age });
+    }
+    if (act.length) drawKeyPills(ctx, act.slice(-3), rx, ry, rw, rh, k);
+  }
+
+  ctx.restore();
+}
+
+function drawKeyPills(ctx, pills, rx, ry, rw, rh, k) {
+  const fs = 21 * k, padX = 15 * k, gap = 9 * k, h = 38 * k, r = 9 * k;
+  ctx.save();
+  ctx.font = `600 ${fs}px -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif`;
+  ctx.textBaseline = 'middle';
+  const widths = pills.map((p) => ctx.measureText(p.label).width + padX * 2);
+  const total = widths.reduce((a, b) => a + b, 0) + gap * (pills.length - 1);
+  let x = rx + rw / 2 - total / 2;
+  const y = ry + rh - 64 * k;
+  pills.forEach((p, i) => {
+    const a = p.age < 1100 ? 1 : 1 - (p.age - 1100) / 300;
+    ctx.globalAlpha = Math.max(0, a);
+    ctx.fillStyle = 'rgba(24,24,27,0.82)';
+    ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 10 * k; ctx.shadowOffsetY = 3 * k;
+    roundRect(ctx, x, y, widths[i], h, r); ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1 * k;
+    roundRect(ctx, x, y, widths[i], h, r); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.fillText(p.label, x + padX, y + h / 2 + 1 * k);
+    x += widths[i] + gap;
+  });
   ctx.restore();
 }
 
@@ -238,6 +340,10 @@ export function drawCamera(ctx, camVideo, cam, W, H) {
   if (cam.mirror) { tctx.translate(tw, 0); tctx.scale(-1, 1); }
   tctx.drawImage(camVideo, (tw - vw * s) / 2, (th - vh * s) / 2, vw * s, vh * s);
   tctx.restore();
+  // 背景虚化:人像分割就绪才生效,没就绪/失败就画原图(优雅降级)
+  if (cam.blurBg && segmenter) {
+    try { applyBgBlur(camCanvas, tctx, tw, th); } catch (e) { /* 单帧失败不打断渲染 */ }
+  }
   // 美颜 = 柔焦磨皮:把轻度模糊 + 提亮的同画面半透明叠回去,肤色变平滑、五官轮廓仍清晰
   if (cam.beauty > 0) {
     tctx.save();

@@ -6,7 +6,7 @@
   if (window.__huarecTracker) return;
   window.__huarecTracker = true;
 
-  const state = { active: false, paused: false, startTime: 0, pausedTotal: 0, pauseStart: 0, lastSample: 0, lastAct: 0, cursor: [], clicks: [], acts: [] };
+  const state = { active: false, paused: false, startTime: 0, pausedTotal: 0, pauseStart: 0, lastSample: 0, lastAct: 0, cursor: [], clicks: [], acts: [], keys: [] };
   const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
   const recTime = () => Date.now() - state.startTime - state.pausedTotal;
   // 用 clientWidth/Height(不含滚动条),否则有滚动条的页面 innerWidth 偏大 → 归一化坐标系统性偏左/偏上
@@ -39,12 +39,34 @@
   window.addEventListener('keydown', onAct, { capture: true, passive: true });
   window.addEventListener('wheel', onAct, { capture: true, passive: true });
 
+  // 按键可视化原料:只记「带修饰键的组合键」和非输入场景的特殊键。
+  // 纯打字(含 Shift+字母)一律不记 —— 隐私默认值要硬,打的字绝不进轨迹。
+  const KEY_SYMBOL = { ' ': 'Space', Enter: '↩', Escape: 'Esc', Backspace: '⌫', Delete: '⌦', Tab: '⇥', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' };
+  const isTyping = (el) => {
+    const t = (el && el.tagName || '').toLowerCase();
+    return t === 'input' || t === 'textarea' || (el && el.isContentEditable);
+  };
+  function onKey(e) {
+    if (!state.active || state.paused) return;
+    const k = e.key;
+    if (k === 'Meta' || k === 'Control' || k === 'Alt' || k === 'Shift') return; // 单按修饰键不算
+    const mods = (e.metaKey ? '⌘' : '') + (e.ctrlKey ? '⌃' : '') + (e.altKey ? '⌥' : '') + (e.shiftKey ? '⇧' : '');
+    let label = null;
+    if (e.metaKey || e.ctrlKey || e.altKey) {
+      label = mods + (KEY_SYMBOL[k] || (k.length === 1 ? k.toUpperCase() : k));
+    } else if (KEY_SYMBOL[k] && !isTyping(e.target)) {
+      label = (e.shiftKey ? '⇧' : '') + KEY_SYMBOL[k]; // 非输入场景的 Esc/回车/方向键等
+    }
+    if (label) state.keys.push({ t: recTime(), label });
+  }
+  window.addEventListener('keydown', onKey, { capture: true, passive: true });
+
   // —— 增量上报:把已采轨迹交给 background 后清空本地,数据所有权在 background ——
   let flushTimer = null;
   function flush() {
-    if (!state.cursor.length && !state.clicks.length && !state.acts.length) return;
-    const delta = { type: 'TRACK_FLUSH', cursor: state.cursor, clicks: state.clicks, acts: state.acts };
-    state.cursor = []; state.clicks = []; state.acts = [];
+    if (!state.cursor.length && !state.clicks.length && !state.acts.length && !state.keys.length) return;
+    const delta = { type: 'TRACK_FLUSH', cursor: state.cursor, clicks: state.clicks, acts: state.acts, keys: state.keys };
+    state.cursor = []; state.clicks = []; state.acts = []; state.keys = [];
     try { chrome.runtime.sendMessage(delta).catch(() => {}); } catch (_) {}
   }
   function startFlushTimer() {
@@ -106,7 +128,7 @@
         state.pausedTotal = msg.pausedTotal || 0;
         state.paused = !!msg.paused;
         state.pauseStart = state.paused ? (msg.pausedAt || Date.now()) : 0;
-        if (!sameSession) { state.cursor = []; state.clicks = []; state.acts = []; }
+        if (!sameSession) { state.cursor = []; state.clicks = []; state.acts = []; state.keys = []; }
         if (msg.hideCursor) dotCursor();
         else if (msg.enhanceCursor) enhanceCursor();
         else restoreCursor();
@@ -122,8 +144,8 @@
         break;
       case 'REQUEST_TRACK': {
         // 停止时 background 来收尾:交出最后一段未上报的增量(全量轨迹由 background 合并)
-        const delta = { cursor: state.cursor, clicks: state.clicks, acts: state.acts };
-        state.cursor = []; state.clicks = []; state.acts = [];
+        const delta = { cursor: state.cursor, clicks: state.clicks, acts: state.acts, keys: state.keys };
+        state.cursor = []; state.clicks = []; state.acts = []; state.keys = [];
         sendResponse(delta);
         return true;
       }

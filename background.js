@@ -27,11 +27,13 @@ let trackWrite = Promise.resolve();
 function appendTrack(delta) {
   trackWrite = trackWrite.then(async () => {
     const { trackBuf } = await chrome.storage.session.get('trackBuf');
-    const buf = trackBuf || { cursor: [], clicks: [], acts: [] };
+    const buf = trackBuf || { cursor: [], clicks: [], acts: [], keys: [] };
     if (!buf.acts) buf.acts = [];
+    if (!buf.keys) buf.keys = [];
     if (delta.cursor?.length) buf.cursor.push(...delta.cursor);
     if (delta.clicks?.length) buf.clicks.push(...delta.clicks);
     if (delta.acts?.length) buf.acts.push(...delta.acts);
+    if (delta.keys?.length) buf.keys.push(...delta.keys);
     await chrome.storage.session.set({ trackBuf: buf });
   }).catch((e) => console.warn('轨迹暂存失败:', e.message));
   return trackWrite;
@@ -39,10 +41,11 @@ function appendTrack(delta) {
 async function takeTrack() {
   await trackWrite; // 等在途的增量写完
   const { trackBuf } = await chrome.storage.session.get('trackBuf');
-  const buf = trackBuf || { cursor: [], clicks: [], acts: [] };
+  const buf = trackBuf || { cursor: [], clicks: [], acts: [], keys: [] };
   buf.cursor.sort((a, b) => a.t - b.t);
   buf.clicks.sort((a, b) => a.t - b.t);
   buf.acts = (buf.acts || []).sort((a, b) => a - b);
+  buf.keys = (buf.keys || []).sort((a, b) => a.t - b.t);
   return buf;
 }
 async function clearTrack() {
@@ -248,6 +251,7 @@ async function stopRecording(opts = {}) {
       rec.cursor = track.cursor || [];
       rec.clicks = track.clicks || [];
       rec.acts = track.acts || [];
+      rec.keys = track.keys || [];
       rec.meta = { ...rec.meta, skinId: st.options?.skinId || 'huashu' };
       await saveRecording(rec);
     }
