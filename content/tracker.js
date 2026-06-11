@@ -65,18 +65,35 @@
     "<path d='M7 4 L7 25 L12.5 19.5 L16 27 L19 25.5 L15.5 18.5 L23 18.5 Z' fill='#000' opacity='0.3' transform='translate(1.3,1.7)'/>" +
     "<path d='M7 4 L7 25 L12.5 19.5 L16 27 L19 25.5 L15.5 18.5 L23 18.5 Z' fill='#fff' stroke='#1c1c1e' stroke-width='1.6' stroke-linejoin='round'/>" +
     "</svg>";
+  // —— 平滑光标模式:把所有光标缩成一个近隐形小点 ——
+  // tabCapture 会把真实光标录进画面;后期要重绘平滑大光标,真实光标就得从画面里"消失"。
+  // 完全 cursor:none 用户录制时就找不到自己的鼠标了,所以折中成 6px 半透明小点:
+  // 用户能定位,画面里几乎看不见,导出时上面还会盖一个重绘的光标。
+  const DOT_SVG =
+    "<svg xmlns='http://www.w3.org/2000/svg' width='6' height='6'>" +
+    "<circle cx='3' cy='3' r='2.6' fill='#888' fill-opacity='0.55'/></svg>";
+
   let cursorStyleEl = null;
-  function enhanceCursor() {
-    if (cursorStyleEl) return;
+  function setCursorStyle(css) {
+    if (cursorStyleEl) { cursorStyleEl.remove(); cursorStyleEl = null; }
+    if (!css) return;
     cursorStyleEl = document.createElement('style');
     cursorStyleEl.id = '__huarecCursor';
+    cursorStyleEl.textContent = css;
+    (document.head || document.documentElement).appendChild(cursorStyleEl);
+  }
+  function enhanceCursor() {
     // html+body 都加 !important:页面若显式设了 body{cursor} 也能压过;按钮/输入框自带的 pointer/text
     // 是元素自身声明,不受影响,语义光标照常保留。
     const url = `url("data:image/svg+xml;utf8,${encodeURIComponent(CURSOR_SVG)}") 7 4, auto`;
-    cursorStyleEl.textContent = `html,body{cursor:${url} !important}`;
-    (document.head || document.documentElement).appendChild(cursorStyleEl);
+    setCursorStyle(`html,body{cursor:${url} !important}`);
   }
-  function restoreCursor() { if (cursorStyleEl) { cursorStyleEl.remove(); cursorStyleEl = null; } }
+  function dotCursor() {
+    // 用 * 覆盖元素自带光标(pointer/text 一并压成小点),画面里才不会冒出手型/竖线
+    const url = `url("data:image/svg+xml;utf8,${encodeURIComponent(DOT_SVG)}") 3 3, none`;
+    setCursorStyle(`*{cursor:${url} !important}`);
+  }
+  function restoreCursor() { setCursorStyle(null); }
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || !msg.type) return;
@@ -90,7 +107,9 @@
         state.paused = !!msg.paused;
         state.pauseStart = state.paused ? (msg.pausedAt || Date.now()) : 0;
         if (!sameSession) { state.cursor = []; state.clicks = []; state.acts = []; }
-        if (msg.enhanceCursor) enhanceCursor(); else restoreCursor();
+        if (msg.hideCursor) dotCursor();
+        else if (msg.enhanceCursor) enhanceCursor();
+        else restoreCursor();
         startFlushTimer();
         break;
       }

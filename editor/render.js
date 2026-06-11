@@ -22,17 +22,19 @@ export function buildZoomSegments(clicks, { lead = 450, tail = 1500 } = {}) {
   return segs;
 }
 
-// 在时间 t(ms)求运镜状态:{scale, fx, fy}
+// 在时间 t(ms)求运镜状态:{scale, fx, fy}。seg.level 可覆盖全局倍数(手动逐段调)
 export function zoomAt(segs, t, zoomLevel, ramp = 500) {
-  if (!segs.length || zoomLevel <= 1.001) return { scale: 1, fx: 0.5, fy: 0.5 };
+  if (!segs.length) return { scale: 1, fx: 0.5, fy: 0.5 };
   const seg = segs.find((s) => t >= s.start && t <= s.end);
   if (!seg) return { scale: 1, fx: 0.5, fy: 0.5 };
+  const lvl = seg.level || zoomLevel;
+  if (lvl <= 1.001) return { scale: 1, fx: 0.5, fy: 0.5 };
   // 动态推拉时长:短段不能全程在过渡中,至少留一段稳定的放大态(否则像没推到位就缩回)
   const r = Math.min(ramp, (seg.end - seg.start) * 0.35);
   let e = 1;
   if (t < seg.start + r) e = smoothstep((t - seg.start) / r);
   else if (t > seg.end - r) e = smoothstep((seg.end - t) / r);
-  const scale = 1 + (zoomLevel - 1) * e;
+  const scale = 1 + (lvl - 1) * e;
   // 焦点:在段内的多个点之间按时间插值,形成自动平移
   const pts = seg.points;
   let fx = pts[0].x, fy = pts[0].y;
@@ -165,13 +167,35 @@ export function drawScene(ctx, video, videoTimeMs, cfg, data, W, H) {
     }
   }
 
-  // 路径A:补画光标(仅当录像本身没有鼠标时才需要;默认关,避免与真实光标双影)
+  // 路径A:补画光标(录像里没有真实光标时用;「平滑光标」录制默认开)。
+  // 平滑 = 在 ±cursorSmooth 毫秒窗口内多点采样取均值,对称窗口不引入拖尾延迟;
+  // 点击瞬间光标轻微下压(squish),手感接近 Screen Studio。
   if (cfg.cursor && data.cursor && data.cursor.length) {
-    const cur = sampleCursor(data.cursor, videoTimeMs);
-    if (cur) drawCursor(ctx, toScreen(cur.x, cur.y), k * z.scale);
+    const cur = sampleCursorSmoothed(data.cursor, videoTimeMs, cfg.cursorSmooth || 0);
+    if (cur) {
+      let squish = 1;
+      if (data.clicks) {
+        for (const c of data.clicks) {
+          const age = videoTimeMs - c.t;
+          if (age >= 0 && age < 180) { squish = 1 - 0.16 * Math.sin(Math.PI * age / 180); break; }
+        }
+      }
+      drawCursor(ctx, toScreen(cur.x, cur.y), k * z.scale * (cfg.cursorSize || 1) * squish);
+    }
   }
 
   ctx.restore();
+}
+
+// 平滑采样:窗口为 0 时退化为普通插值
+function sampleCursorSmoothed(cursor, t, w) {
+  if (!w) return sampleCursor(cursor, t);
+  let x = 0, y = 0, n = 0;
+  for (let i = -2; i <= 2; i++) {
+    const p = sampleCursor(cursor, t + (i * w) / 2);
+    if (p) { x += p.x; y += p.y; n++; }
+  }
+  return n ? { x: x / n, y: y / n } : null;
 }
 
 // ---- 摄像头气泡:独立于屏幕轨的浮层,预览与导出共用 ----

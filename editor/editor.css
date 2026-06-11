@@ -68,7 +68,18 @@ body {
 .play:hover { background: rgba(255,255,255,0.18); }
 .t { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--text2); min-width: 38px; }
 /* 胶片缩略图轨道:看得见在剪哪一段 */
-.strip-wrap { flex: 1; position: relative; height: 46px; border-radius: 8px; overflow: hidden; background: #1c1c1e; cursor: text; user-select: none; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
+.strip-col { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* 运镜轨:胶片上方一条细轨,胶囊 = 一段运镜 */
+.zoom-lane { position: relative; height: 13px; }
+.zoom-lane.off { opacity: 0.3; }
+.zoom-pill {
+  position: absolute; top: 0; bottom: 0; min-width: 8px; border-radius: 99px;
+  background: rgba(255,107,74,0.35); box-shadow: inset 0 0 0 1px rgba(255,107,74,0.7);
+  cursor: grab;
+}
+.zoom-pill:hover { background: rgba(255,107,74,0.55); }
+.zoom-pill.sel { background: var(--accent); box-shadow: 0 0 0 1.5px #fff, 0 1px 4px rgba(0,0,0,0.4); }
+.strip-wrap { position: relative; height: 46px; border-radius: 8px; overflow: hidden; background: #1c1c1e; cursor: text; user-select: none; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
 .filmstrip { position: absolute; inset: 0; background-size: 100% 100%; background-repeat: no-repeat; opacity: 0.92; }
 .gaps, .speed-tags { position: absolute; inset: 0; pointer-events: none; }
 .gap { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(45deg, rgba(10,10,12,0.82) 0 5px, rgba(44,44,48,0.82) 5px 10px); box-shadow: inset 0 0 0 1px rgba(0,0,0,0.45); }

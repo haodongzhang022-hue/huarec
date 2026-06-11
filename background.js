@@ -176,7 +176,7 @@ async function startRecording(options = {}) {
   // 注入【隐形】光标追踪器(不渲染 UI,所以不会被录进画面)
   try {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/tracker.js'] });
-    await chrome.tabs.sendMessage(tab.id, { type: 'REC_START', startTime: started.startTime, enhanceCursor: options.enhanceCursor !== false });
+    await chrome.tabs.sendMessage(tab.id, { type: 'REC_START', startTime: started.startTime, enhanceCursor: options.enhanceCursor !== false, hideCursor: options.smoothCursor === true });
   } catch (e) {
     console.warn('注入追踪器失败:', e.message);
   }
@@ -276,8 +276,8 @@ async function toggle() {
   const st = await getState();
   if (st.status === 'idle') {
     // 沿用 popup 里的偏好,保证快捷键起录与点按钮一致(音频/光标默认开,摄像头/麦克风默认关)
-    const { lastAudio, lastCursor, lastCamera, lastMic } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera', 'lastMic']);
-    await startRecording({ audio: lastAudio !== false, enhanceCursor: lastCursor !== false, camera: lastCamera === true, mic: lastMic === true });
+    const { lastAudio, lastCursor, lastCamera, lastMic, lastSmooth } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera', 'lastMic', 'lastSmooth']);
+    await startRecording({ audio: lastAudio !== false, enhanceCursor: lastCursor !== false, camera: lastCamera === true, mic: lastMic === true, smoothCursor: lastSmooth === true });
   } else await stopRecording();
 }
 
@@ -325,6 +325,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
       paused: st.status === 'paused',
       pausedAt: st.pausedAt || 0,
       enhanceCursor: st.options?.enhanceCursor !== false,
+      hideCursor: st.options?.smoothCursor === true,
     });
   } catch (e) {
     console.warn('导航后重注入追踪器失败:', e.message);

@@ -94,6 +94,7 @@ async function start(streamId, options) {
     width: vset.width || 1280,
     height: vset.height || 720,
     hasAudio: !!audio,
+    hiddenCursor: options.smoothCursor === true, // 真实光标已缩成小点,编辑器默认开补画
     createdAt: Date.now(),
   };
 

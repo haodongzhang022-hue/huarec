@@ -53,9 +53,10 @@ async function checkMic(interactive) {
 }
 
 async function init() {
-  const { lastAudio, lastCursor, lastCamera, lastMic } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera', 'lastMic']);
+  const { lastAudio, lastCursor, lastCamera, lastMic, lastSmooth } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera', 'lastMic', 'lastSmooth']);
   if (lastAudio === false) $('audio').checked = false;
   if (lastCursor === false) $('cursor').checked = false;
+  if (lastSmooth === true) $('smooth').checked = true;
   if (lastCamera === true) {
     $('camera').checked = true;
     setCamPreview(true, false).then((ok) => { if (!ok) $('camera').checked = false; });
@@ -129,10 +130,11 @@ async function start() {
   const enhanceCursor = $('cursor').checked;
   const camera = $('camera').checked;
   const mic = $('mic').checked;
-  chrome.storage.local.set({ lastAudio: audio, lastCursor: enhanceCursor, lastCamera: camera, lastMic: mic });
+  const smoothCursor = $('smooth').checked;
+  chrome.storage.local.set({ lastAudio: audio, lastCursor: enhanceCursor, lastCamera: camera, lastMic: mic, lastSmooth: smoothCursor });
   // 先放掉弹窗占用的摄像头,offscreen 才能稳拿同一台设备
   await setCamPreview(false);
-  const res = await chrome.runtime.sendMessage({ type: 'START_RECORDING', options: { audio, enhanceCursor, camera, mic } });
+  const res = await chrome.runtime.sendMessage({ type: 'START_RECORDING', options: { audio, enhanceCursor, camera, mic, smoothCursor } });
   if (res && res.ok) {
     window.close();
   } else {

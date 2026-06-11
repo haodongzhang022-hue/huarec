@@ -1,5 +1,5 @@
 import { BACKGROUNDS, getSkin, getBackground } from '../lib/presets.js';
-import { drawScene, buildZoomSegments, preloadBackground, drawCamera, cameraRect } from './render.js';
+import { drawScene, buildZoomSegments, preloadBackground, drawCamera, cameraRect, zoomAt } from './render.js';
 import {
   getRecording, listRecordings, deleteRecording, saveRecording,
   getProject, saveProject, getAllProjects,
@@ -10,7 +10,7 @@ import { exportMedia } from './exporter.js';
 const $ = (id) => document.getElementById(id);
 const fmt = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 // 背景色块预览:壁纸本身就是图片,直接当缩略图用,所见即所得
-const RAW = { background: getBackground('none'), padding: 0, radius: 0, shadow: 0, accent: '#FF6B4A', clickFx: false, autoZoom: false, zoomLevel: 1 };
+const RAW = { background: getBackground('none'), padding: 0, radius: 0, shadow: 0, accent: '#FF6B4A', clickFx: false, autoZoom: false, zoomLevel: 1, cursorSize: 1, cursorSmooth: 0 };
 
 // ---- 状态 ----
 let cfg, data, rawBlob, recMeta;
@@ -31,6 +31,8 @@ let camCfg = null;                              // 气泡配置 {show,x,y,size,s
 let savedCamPrefs = null;                       // 本段没有摄像头轨时,保住已存的摄像头偏好不被 savePrefs 覆盖
 let proj = null, projTimer = null;              // 本段录制的编辑工程(剪辑/美化/摄像头),防抖持久化,关页不丢
 let micBlob = null, micAudio = null, micOffset = 0; // 麦克风轨:独立 audio 元素同步预览,导出时混音
+let prefsSnapshot = {};                         // 打开时的全局偏好快照:平滑光标录制不把 cursor=true 写回污染普通录制
+let zoomSel = null;                             // 选中的运镜段(对象引用,排序后不失效)
 let tabVol = 1, micVol = 1;                     // 混音音量(0~1.5);预览端 element.volume 只能到 1,超出部分导出生效
 
 const id = new URLSearchParams(location.search).get('id');
@@ -167,15 +169,20 @@ async function loadEditor(recId) {
   }
 
   data = { cursor: rec.cursor || [], clicks: rec.clicks || [], acts: rec.acts || [], zoomSegs: buildZoomSegments(rec.clicks || []) };
+  // 运镜段可编辑:工程里存过就用工程的(点击自动生成的只是初始值)
+  if (Array.isArray(proj.zoomSegs)) {
+    data.zoomSegs = proj.zoomSegs.filter((s) => s && s.end > s.start && Array.isArray(s.points) && s.points.length);
+  }
   // 诊断:自动放大/点击波纹都依赖录制时采到的点击;为空就直接告诉花叔,免得以为功能坏了
   const nClick = data.clicks.length;
   $('trackInfo').textContent = nClick > 0
-    ? `本次录制采集到 ${nClick} 次点击,运镜与波纹生效`
-    : '⚠ 本次录制没有采集到点击 — 自动放大与波纹将无效果';
+    ? `本次录制采集到 ${nClick} 次点击,运镜与波纹生效;时间轴上方可逐段编辑运镜`
+    : '⚠ 没有采集到点击 — 可在时间轴拖选区后点「这段加运镜」手动添加';
   $('trackInfo').style.color = nClick > 0 ? '' : '#ff8163';
 
   // 载入上次皮肤(记忆)。默认直接进「美化」:这是产品的核心价值,也避免新手进来看到空面板犯懵。
   const prefs = await loadPrefs();
+  prefsSnapshot = prefs;
   applySkin(getSkin(prefs.skinId || recMeta.skinId || 'huashu'), prefs);
   beautify = true;
   // 本段录制有工程就用工程(对这一段的决定优先于全局偏好)
@@ -184,6 +191,7 @@ async function loadEditor(recId) {
     cfg = {
       background: getBackground(pc.background), padding: pc.padding, radius: pc.radius, shadow: pc.shadow,
       accent: cfg.accent, clickFx: pc.clickFx, cursor: pc.cursor, autoZoom: pc.autoZoom, zoomLevel: pc.zoomLevel,
+      cursorSize: pc.cursorSize ?? cfg.cursorSize, cursorSmooth: pc.cursorSmooth ?? cfg.cursorSmooth,
     };
   }
   if (typeof proj.beautify === 'boolean') beautify = proj.beautify;
@@ -218,7 +226,7 @@ async function loadEditor(recId) {
   if (micBlob || recMeta.hasAudio) bindAudioControls();
 
   buildBgChips(); markBg(cfg.background.id);
-  bindSegments(); bindControls(); bindTransport(); bindTimeline(); bindKeys();
+  bindSegments(); bindControls(); bindTransport(); bindTimeline(); bindZoomControls(); bindKeys();
   syncBeautifyUI();
   recompute(); syncControls(); render(); syncTimeline();
   requestAnimationFrame(frame);
@@ -246,7 +254,9 @@ function scheduleProjectSave() {
     proj.cfg = {
       background: cfg.background.id, padding: cfg.padding, radius: cfg.radius, shadow: cfg.shadow,
       clickFx: cfg.clickFx, cursor: cfg.cursor, autoZoom: cfg.autoZoom, zoomLevel: cfg.zoomLevel,
+      cursorSize: cfg.cursorSize, cursorSmooth: cfg.cursorSmooth,
     };
+    proj.zoomSegs = data.zoomSegs.map((s) => ({ start: s.start, end: s.end, level: s.level, points: s.points.map((p) => ({ ...p })) }));
     proj.camCfg = camCfg ? { ...camCfg } : null;
     proj.audio = { tabVol, micVol };
     proj.savedAt = Date.now();
@@ -271,16 +281,23 @@ function savePrefs() {
   const camera = camCfg
     ? { x: camCfg.x, y: camCfg.y, size: camCfg.size, shape: camCfg.shape, beauty: camCfg.beauty, mirror: camCfg.mirror, ring: camCfg.ring }
     : savedCamPrefs;
+  // 平滑光标录制里 cursor 必然是 true、smooth 必然非 0,这俩不回写全局(否则普通录制会冒出双光标)
+  const hidden = !!recMeta.hiddenCursor;
   chrome.storage.local.set({ editorPrefs: {
     skinId: currentSkinId, padding: cfg.padding, radius: cfg.radius, shadow: cfg.shadow,
     background: cfg.background.id, autoZoom: cfg.autoZoom, zoomLevel: cfg.zoomLevel,
-    clickFx: cfg.clickFx, cursor: cfg.cursor, camera,
+    clickFx: cfg.clickFx,
+    cursor: hidden ? (prefsSnapshot.cursor ?? false) : cfg.cursor,
+    cursorSmooth: hidden ? prefsSnapshot.cursorSmooth : cfg.cursorSmooth,
+    cursorSize: cfg.cursorSize, camera,
   } });
   scheduleProjectSave(); // 全局偏好动了,本段工程也跟着记一笔
 }
 
 function applySkin(skin, prefs = {}) {
   currentSkinId = skin.id;
+  // 「平滑光标」录制:真实光标已是隐形小点 → 补画默认开、平滑默认 120ms;普通录制维持默认关(防双影)
+  const hidden = !!recMeta.hiddenCursor;
   cfg = {
     background: getBackground(prefs.background || skin.background),
     padding: prefs.padding ?? skin.padding,
@@ -288,7 +305,9 @@ function applySkin(skin, prefs = {}) {
     shadow: prefs.shadow ?? skin.shadow,
     accent: skin.accent,
     clickFx: prefs.clickFx ?? skin.clickFx,
-    cursor: prefs.cursor ?? false, // 路径A 补画光标:默认关,避免与真实光标双影
+    cursor: hidden ? true : (prefs.cursor ?? false),
+    cursorSize: prefs.cursorSize ?? 1,
+    cursorSmooth: prefs.cursorSmooth ?? (hidden ? 120 : 0),
     autoZoom: prefs.autoZoom ?? skin.autoZoom,
     zoomLevel: prefs.zoomLevel ?? (skin.autoZoom ? 1.6 : 1),
   };
@@ -431,6 +450,19 @@ function syncTimeline() {
     cur = Math.max(cur, seg.e);
   }
   if (cur < dur) gaps.appendChild(makeBox('gap', pct(cur), pct(dur - cur)));
+  // 运镜轨胶囊(宽度按时长算,不走 pct 的 viewStart 平移)
+  const lane = $('zoomLane');
+  lane.classList.toggle('off', !(beautify && cfg.autoZoom));
+  lane.innerHTML = '';
+  data.zoomSegs.forEach((zs, i) => {
+    const p = document.createElement('div');
+    p.className = 'zoom-pill' + (zs === zoomSel ? ' sel' : '');
+    p.dataset.i = i;
+    p.style.left = pct(zs.start);
+    p.style.width = ((zs.end - zs.start) / span * 100) + '%';
+    p.title = `运镜 ${((zs.end - zs.start) / 1000).toFixed(1)}s${zs.level ? ` · ${zs.level}×` : ''}`;
+    lane.appendChild(p);
+  });
   const band = $('selBand');
   if (sel) { band.hidden = false; band.style.left = pct(sel.a); band.style.width = pct(sel.b - sel.a); }
   else band.hidden = true;
@@ -531,6 +563,121 @@ function bindTimeline() {
   $('resetEdits').onclick = () => { pushHistory(); segments = [{ s: 0, e: videoDur, speed: 1 }]; sel = null; recompute(); afterEdit(); };
 }
 function afterEdit() { syncSelBar(); seekPreview(Math.min(playSrc, videoDur)); scheduleProjectSave(); }
+
+// ---- 运镜段编辑(Screen Studio 式) ----
+function selectZoom(seg) {
+  zoomSel = seg;
+  $('zoomBar').hidden = !seg;
+  if (seg) {
+    $('zoomInfo').textContent = `运镜 ${((seg.end - seg.start) / 1000).toFixed(1)}s`;
+    document.querySelectorAll('#zoomLevelSeg button').forEach((b) => b.classList.toggle('on', (+b.dataset.zl || 0) === (seg.level || 0)));
+    pausePlayback(); seekPreview((seg.start + seg.end) / 2); // 跳到段中部:所见即所调
+  }
+  syncTimeline();
+}
+
+// 预览画布坐标 → 视频源归一化坐标(复刻 drawScene 的留白与运镜裁剪几何)
+function canvasToSource(e) {
+  const r = canvas.getBoundingClientRect();
+  const px = (e.clientX - r.left) / r.width * W, py = (e.clientY - r.top) / r.height * H;
+  const c = curCfg();
+  const padX = c.padding * W, padY = c.padding * H;
+  const rx = padX, ry = padY, rw = W - padX * 2, rh = H - padY * 2;
+  if (px < rx || px > rx + rw || py < ry || py > ry + rh) return null;
+  const VW = video.videoWidth || W, VH = video.videoHeight || H;
+  const z = c.autoZoom ? zoomAt(data.zoomSegs, video.currentTime * 1000, c.zoomLevel) : { scale: 1, fx: 0.5, fy: 0.5 };
+  const cw = VW / z.scale, ch = VH / z.scale;
+  const cx0 = Math.max(0, Math.min(VW - cw, z.fx * VW - cw / 2));
+  const cy0 = Math.max(0, Math.min(VH - ch, z.fy * VH - ch / 2));
+  const clamp01 = (v) => Math.max(0, Math.min(1, v));
+  return { x: clamp01((cx0 + (px - rx) / rw * cw) / VW), y: clamp01((cy0 + (py - ry) / rh * ch) / VH) };
+}
+
+function bindZoomControls() {
+  // 运镜轨:点选;拖中间移动整段,拖两端 7px 内改起止
+  const lane = $('zoomLane');
+  lane.addEventListener('pointerdown', (e) => {
+    const pill = e.target.closest('.zoom-pill');
+    if (!pill) return;
+    e.preventDefault();
+    const seg = data.zoomSegs[+pill.dataset.i];
+    if (!seg) return;
+    if (zoomSel !== seg) selectZoom(seg);
+    const wrapRect = $('stripWrap').getBoundingClientRect();
+    const msPerPx = ((viewEnd - viewStart) || videoDur) / wrapRect.width;
+    const pr = pill.getBoundingClientRect();
+    const mode = e.clientX - pr.left < 7 ? 's' : pr.right - e.clientX < 7 ? 'e' : 'move';
+    const startX = e.clientX, s0 = seg.start, e0 = seg.end;
+    let moved = false;
+    const mv = (ev) => {
+      if (Math.abs(ev.clientX - startX) > 3) moved = true;
+      if (!moved) return;
+      const d = (ev.clientX - startX) * msPerPx;
+      if (mode === 's') seg.start = Math.max(0, Math.min(seg.end - 200, s0 + d));
+      else if (mode === 'e') seg.end = Math.min(videoDur, Math.max(seg.start + 200, e0 + d));
+      else {
+        const len = e0 - s0;
+        seg.start = Math.max(0, Math.min(videoDur - len, s0 + d));
+        seg.end = seg.start + len;
+      }
+      syncTimeline();
+    };
+    const up = () => {
+      document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', up);
+      if (moved) {
+        data.zoomSegs.sort((a, b) => a.start - b.start);
+        $('zoomInfo').textContent = `运镜 ${((seg.end - seg.start) / 1000).toFixed(1)}s`;
+        scheduleProjectSave(); render();
+      }
+    };
+    document.addEventListener('pointermove', mv); document.addEventListener('pointerup', up);
+  });
+
+  // 选区一键加运镜:焦点取选区内的点击,没有就先用画面中心(可在画面上点一下重设)
+  $('selZoom').onclick = () => {
+    if (!sel) return;
+    const points = data.clicks.filter((c) => c.t >= sel.a && c.t <= sel.b).map((c) => ({ t: c.t, x: c.x, y: c.y }));
+    const seg = { start: sel.a, end: sel.b, points: points.length ? points : [{ t: (sel.a + sel.b) / 2, x: 0.5, y: 0.5 }] };
+    data.zoomSegs.push(seg);
+    data.zoomSegs.sort((a, b) => a.start - b.start);
+    if (!cfg.autoZoom) { cfg.autoZoom = true; $('autoZoom').checked = true; }
+    sel = null; syncSelBar();
+    selectZoom(seg);
+    scheduleProjectSave(); render();
+  };
+
+  $('zoomDelete').onclick = () => {
+    if (!zoomSel) return;
+    data.zoomSegs = data.zoomSegs.filter((s) => s !== zoomSel);
+    selectZoom(null);
+    scheduleProjectSave(); render();
+  };
+  $('zoomClear').onclick = () => selectZoom(null);
+  document.querySelectorAll('#zoomLevelSeg button').forEach((b) => {
+    b.onclick = () => {
+      if (!zoomSel) return;
+      const v = +b.dataset.zl;
+      if (v) zoomSel.level = v; else delete zoomSel.level;
+      document.querySelectorAll('#zoomLevelSeg button').forEach((x) => x.classList.toggle('on', x === b));
+      scheduleProjectSave(); render();
+    };
+  });
+
+  // 选中运镜段时,点预览画面 = 重设焦点(点在摄像头气泡上除外,拖气泡优先)
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!zoomSel) return;
+    if (camCfg && camCfg.show && camVideo) {
+      const cr = cameraRect(camCfg, camVideo, W, H);
+      const r = canvas.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width * W, py = (e.clientY - r.top) / r.height * H;
+      if (px >= cr.x && px <= cr.x + cr.w && py >= cr.y && py <= cr.y + cr.h) return;
+    }
+    const src = canvasToSource(e);
+    if (!src) return;
+    zoomSel.points = [{ t: (zoomSel.start + zoomSel.end) / 2, x: src.x, y: src.y }];
+    scheduleProjectSave(); render();
+  });
+}
 
 // ---- 自动剪空白 ----
 // 活动信号取并集:光标移动 / 点击 / 键盘·滚轮心跳 / 音频能量(有声音=有内容,网页在播视频时不会被误剪)。
@@ -678,7 +825,7 @@ function buildBgChips() {
 function markBg(v) { document.querySelectorAll('#bgChips .chip').forEach((c) => c.classList.toggle('sel', c.dataset.bg === v)); }
 
 // 滑杆进度填充:已走过的轨道涂强调色(CSS 用 --p 画填充),原生 range 做不到
-const RANGE_IDS = ['padding', 'radius', 'shadow', 'zoomLevel'];
+const RANGE_IDS = ['padding', 'radius', 'shadow', 'zoomLevel', 'cursorSize', 'cursorSmooth'];
 function paintRange(el) {
   const min = +el.min || 0, max = +el.max || 100;
   el.style.setProperty('--p', ((el.value - min) / (max - min)) * 100 + '%');
@@ -695,6 +842,8 @@ function bindControls() {
   on('zoomLevel', 'input', (e) => { cfg.zoomLevel = +e.target.value / 100; $('vZoom').textContent = (cfg.zoomLevel).toFixed(2) + '×'; rr(); });
   on('clickFx', 'change', (e) => { cfg.clickFx = e.target.checked; rr(); });
   on('cursorOn', 'change', (e) => { cfg.cursor = e.target.checked; rr(); });
+  on('cursorSize', 'input', (e) => { cfg.cursorSize = +e.target.value / 100; $('vCurSize').textContent = e.target.value; rr(); });
+  on('cursorSmooth', 'input', (e) => { cfg.cursorSmooth = +e.target.value; $('vCurSmooth').textContent = e.target.value; rr(); });
 }
 
 function syncControls() {
@@ -705,6 +854,8 @@ function syncControls() {
   $('zoomLevel').value = Math.round(cfg.zoomLevel * 100); $('vZoom').textContent = cfg.zoomLevel.toFixed(2) + '×';
   $('clickFx').checked = cfg.clickFx;
   $('cursorOn').checked = !!cfg.cursor;
+  $('cursorSize').value = Math.round(cfg.cursorSize * 100); $('vCurSize').textContent = Math.round(cfg.cursorSize * 100);
+  $('cursorSmooth').value = cfg.cursorSmooth; $('vCurSmooth').textContent = cfg.cursorSmooth;
   if (cfg.background) markBg(cfg.background.id);
   RANGE_IDS.forEach((id) => paintRange($(id)));
 }
