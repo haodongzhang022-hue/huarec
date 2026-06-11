@@ -77,9 +77,14 @@
           </div>
         </div>
 
+        <div class="group beautify-only" id="gBg">
+          <div class="ghead"><span class="gtitle">背景</span></div>
+          <p class="gdesc">视频垫在壁纸上,所见即导出</p>
+          <div id="bgChips" class="chips bg"></div>
+        </div>
+
         <div class="group beautify-only" id="gScene">
           <div class="ghead"><span class="gtitle">画面</span></div>
-          <div id="bgChips" class="chips bg"></div>
           <label class="row"><span>留白</span><input id="padding" type="range" min="0" max="18" /><span class="val" id="vPad"></span></label>
           <label class="row"><span>圆角</span><input id="radius" type="range" min="0" max="40" /><span class="val" id="vRad"></span></label>
           <label class="row"><span>阴影</span><input id="shadow" type="range" min="0" max="100" /><span class="val" id="vSha"></span></label>
@@ -95,8 +100,39 @@
           <p class="gdesc" id="trackInfo"></p>
         </div>
 
+        <div class="group" id="gCam" hidden>
+          <div class="ghead"><span class="gtitle">摄像头</span></div>
+          <label class="sw"><span class="lbl">显示摄像头<span class="sub">在预览画面上可直接拖动摆位</span></span><input type="checkbox" id="camShow" /><span class="track-sw"></span></label>
+          <div class="cam-rows">
+            <div class="seg small" id="camShapeSeg" title="窗口样式">
+              <button data-shape="circle">圆形</button>
+              <button data-shape="square">方圆</button>
+              <button data-shape="rect">卡片</button>
+            </div>
+            <div class="seg small" id="camPosSeg" title="快速摆位到四角">
+              <button data-pos="lt">↖</button>
+              <button data-pos="rt">↗</button>
+              <button data-pos="lb">↙</button>
+              <button data-pos="rb">↘</button>
+            </div>
+          </div>
+          <label class="row"><span>大小</span><input id="camSize" type="range" min="10" max="48" /><span class="val" id="vCamSize"></span></label>
+          <label class="row"><span>美颜</span><input id="camBeauty" type="range" min="0" max="100" /><span class="val" id="vCamBeauty"></span></label>
+          <label class="sw"><span class="lbl">镜像<span class="sub">和照镜子一致(自拍习惯)</span></span><input type="checkbox" id="camMirror" /><span class="track-sw"></span></label>
+          <label class="sw"><span class="lbl">白色描边</span><input type="checkbox" id="camRing" /><span class="track-sw"></span></label>
+        </div>
+
         <div class="group" id="gTrim">
           <div class="ghead"><span class="gtitle">剪辑</span></div>
+          <div class="trim-auto">
+            <div class="seg small" id="idleSeg" title="连续多久没动静算空白">
+              <button data-idle="2000">2s</button>
+              <button data-idle="3000" class="on">3s</button>
+              <button data-idle="5000">5s</button>
+            </div>
+            <button class="btn-trim" id="autoTrim">剪除空白</button>
+          </div>
+          <p class="gdesc" id="trimInfo">一键剪掉「没操作、也没声音」的片段:发呆、等加载的空白。</p>
           <p class="gdesc">在下方胶片轨道上拖出选区,删掉中间废片段或给它变速;删头尾也一样,选中再删。</p>
           <div class="kbd-hints">
             <span><b>空格</b> 播放 / 暂停</span>

@@ -10,6 +10,12 @@ let startTime = 0;
 let pausedTotal = 0; // 累计暂停时长(ms),不计入录像时长
 let pausedAt = 0;
 let meta = {};
+// 摄像头轨:单独录一条 WebM,不烤进屏幕画面 → 编辑器里作为可调气泡合成(位置/大小/美颜录后随便改)
+let camRecorder = null;
+let camChunks = [];
+let camStream = null;
+let camStartTime = 0;
+let camStopped = null; // camRecorder 完全停止(chunks 已 flush)的 promise
 
 function reply(type, extra = {}) {
   chrome.runtime.sendMessage({ type, target: 'background', ...extra }).catch(() => {});
@@ -67,6 +73,27 @@ async function start(streamId, options) {
     createdAt: Date.now(),
   };
 
+  // 摄像头轨:取流失败(没设备/没权限/被占用)只降级为纯录屏,绝不让整次录制失败。
+  camRecorder = null; camChunks = []; camStream = null; camStartTime = 0; camStopped = null;
+  if (options.camera) {
+    try {
+      camStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+        audio: false,
+      });
+      const camMime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+      camRecorder = new MediaRecorder(camStream, { mimeType: camMime, videoBitsPerSecond: 5_000_000 });
+      camRecorder.ondataavailable = (e) => { if (e.data && e.data.size) camChunks.push(e.data); };
+      camRecorder.onstart = () => { camStartTime = Date.now(); };
+      camStopped = new Promise((res) => { camRecorder.onstop = res; });
+      camRecorder.start(1000);
+    } catch (e) {
+      console.warn('摄像头获取失败,本段仅录屏幕:', e.message);
+      if (camStream) camStream.getTracks().forEach((t) => t.stop());
+      camStream = null; camRecorder = null; camStopped = null;
+    }
+  }
+
   const mimeType = pickMime();
   // 码率随分辨率自适应:普通屏保持 8Mbps,Retina(2880×1800 等)按 0.12 bit/px/帧 拉高到上限 24M,
   // 否则高分辨率下 8M 会让滚动/弹窗等运动场景糊掉(0.051 bit/px/帧 远低于 VP9 推荐)。
@@ -92,8 +119,23 @@ async function onStop() {
   // MediaRecorder 的 WebM 没有 Duration 元数据 → 播放器拖不动进度条,编辑器要 seek 到末尾探测时长。
   // 存库前补写;失败就保留原 blob(老行为),不阻塞保存。
   try { blob = await fixWebmDuration(blob, meta.durationMs, { logger: false }); } catch (_) {}
+  // 摄像头轨收尾:等它的 chunks 全部 flush,记录与屏幕轨的起点偏移供编辑器对齐
+  let camBlob = null;
+  if (camRecorder) {
+    try {
+      if (camRecorder.state !== 'inactive') camRecorder.stop();
+      await camStopped;
+      if (camChunks.length) {
+        camBlob = new Blob(camChunks, { type: 'video/webm' });
+        meta.hasCam = true;
+        meta.camOffsetMs = camStartTime - startTime;
+        const camDur = Date.now() - camStartTime - pausedTotal;
+        try { camBlob = await fixWebmDuration(camBlob, camDur, { logger: false }); } catch (_) {}
+      }
+    } catch (e) { console.warn('摄像头轨保存失败,仅保留屏幕轨:', e.message); }
+  }
   try {
-    await saveRecording({ id, blob, cursor: [], clicks: [], meta });
+    await saveRecording({ id, blob, camBlob, cursor: [], clicks: [], meta });
     reply('OFFSCREEN_STOPPED', { id, meta });
   } catch (e) {
     reply('OFFSCREEN_STOPPED', { id: null, error: e.message });
@@ -103,8 +145,10 @@ async function onStop() {
 
 function cleanup() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
+  if (camStream) camStream.getTracks().forEach((t) => t.stop());
   if (audioCtx) audioCtx.close().catch(() => {});
   stream = null; audioCtx = null; recorder = null; chunks = [];
+  camStream = null; camRecorder = null; camChunks = []; camStopped = null;
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -117,10 +161,12 @@ chrome.runtime.onMessage.addListener((msg) => {
       break;
     case 'OFFSCREEN_PAUSE':
       if (recorder && recorder.state === 'recording') { recorder.pause(); pausedAt = Date.now(); }
+      if (camRecorder && camRecorder.state === 'recording') camRecorder.pause();
       reply('OFFSCREEN_PAUSED');
       break;
     case 'OFFSCREEN_RESUME':
       if (recorder && recorder.state === 'paused') { recorder.resume(); if (pausedAt) { pausedTotal += Date.now() - pausedAt; pausedAt = 0; } }
+      if (camRecorder && camRecorder.state === 'paused') camRecorder.resume();
       reply('OFFSCREEN_RESUMED');
       break;
     case 'OFFSCREEN_STOP':

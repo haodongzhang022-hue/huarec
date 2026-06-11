@@ -1,23 +1,11 @@
 import { BACKGROUNDS, getSkin, getBackground } from '../lib/presets.js';
-import { drawScene, buildZoomSegments } from './render.js';
+import { drawScene, buildZoomSegments, preloadBackground, drawCamera, cameraRect } from './render.js';
 import { getRecording, listRecordings, deleteRecording } from '../lib/db.js';
 import { exportMedia } from './exporter.js';
 
 const $ = (id) => document.getElementById(id);
 const fmt = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
-function bgCss(bg) {
-  if (!bg || bg.type === 'none') return 'repeating-conic-gradient(#3a3a40 0% 25%, #2c2c30 0% 50%) 0 / 10px 10px';
-  if (bg.type === 'solid') return bg.value;
-  if (bg.type === 'aurora') {
-    const ah = (a) => Math.round(Math.max(0, Math.min(1, a)) * 255).toString(16).padStart(2, '0');
-    const blobs = (bg.blobs || []).map((b) =>
-      `radial-gradient(circle at ${Math.round(b.cx * 100)}% ${Math.round(b.cy * 100)}%, ${b.color}${ah(b.alpha != null ? b.alpha : 0.5)} 0%, ${b.color}00 ${Math.round(b.r * 70)}%)`
-    );
-    const lin = `linear-gradient(${bg.grad.angle}deg, ${bg.grad.stops.map(([p, c]) => `${c} ${Math.round(p * 100)}%`).join(', ')})`;
-    return [...blobs, lin].join(', ');
-  }
-  return `linear-gradient(${bg.angle}deg, ${bg.stops[0]}, ${bg.stops[1]})`;
-}
+// 背景色块预览:壁纸本身就是图片,直接当缩略图用,所见即所得
 const RAW = { background: getBackground('none'), padding: 0, radius: 0, shadow: 0, accent: '#FF6B4A', clickFx: false, autoZoom: false, zoomLevel: 1 };
 
 // ---- 状态 ----
@@ -34,6 +22,9 @@ let history = [];                   // 剪辑撤销栈(segments 快照)
 let exportSize = 'orig';            // 导出尺寸:orig / 1080 / 720
 let playing = false, exporting = false;
 let currentSkinId = 'huashu';
+let camVideo = null, camDur = 0, camOffset = 0; // 摄像头轨:独立 video 元素 + 与屏幕轨的起点偏移
+let camCfg = null;                              // 气泡配置 {show,x,y,size,shape,beauty,mirror,ring}
+let savedCamPrefs = null;                       // 本段没有摄像头轨时,保住已存的摄像头偏好不被 savePrefs 覆盖
 
 const id = new URLSearchParams(location.search).get('id');
 if (id) loadEditor(id); else showLibrary();
@@ -84,7 +75,7 @@ async function loadEditor(recId) {
   segments = [{ s: 0, e: videoDur, speed: 1 }]; playSrc = 0; playIdx = 0;
   viewStart = 0; viewEnd = videoDur;
 
-  data = { cursor: rec.cursor || [], clicks: rec.clicks || [], zoomSegs: buildZoomSegments(rec.clicks || []) };
+  data = { cursor: rec.cursor || [], clicks: rec.clicks || [], acts: rec.acts || [], zoomSegs: buildZoomSegments(rec.clicks || []) };
   // 诊断:自动放大/点击波纹都依赖录制时采到的点击;为空就直接告诉花叔,免得以为功能坏了
   const nClick = data.clicks.length;
   $('trackInfo').textContent = nClick > 0
@@ -96,6 +87,24 @@ async function loadEditor(recId) {
   const prefs = await loadPrefs();
   applySkin(getSkin(prefs.skinId || recMeta.skinId || 'huashu'), prefs);
   beautify = true;
+  preloadBackground(cfg.background); // 壁纸解码完成后帧循环自然画上
+
+  // 摄像头轨:有就建第二个 video,气泡浮在画面上(位置/大小/样式/美颜都在这里调)
+  savedCamPrefs = prefs.camera || null;
+  if (rec.camBlob) {
+    camVideo = document.createElement('video');
+    camVideo.src = URL.createObjectURL(rec.camBlob);
+    camVideo.preload = 'auto'; camVideo.muted = true; camVideo.playsInline = true;
+    camVideo.style.cssText = 'position:fixed;left:-99999px;width:240px;';
+    document.body.appendChild(camVideo);
+    await once(camVideo, 'loadedmetadata');
+    camDur = isFinite(camVideo.duration) && camVideo.duration > 0 ? camVideo.duration * 1000 : videoDur;
+    camOffset = recMeta.camOffsetMs || 0;
+    // show 不持久化:每段录制默认显示,藏不藏是对这一段的决定
+    camCfg = { x: 0.86, y: 0.82, size: 0.24, shape: 'circle', beauty: 0.4, mirror: true, ring: true, ...(savedCamPrefs || {}), show: true };
+    syncCam(true);
+    bindCamControls(); syncCamControls();
+  }
 
   buildBgChips(); markBg(cfg.background.id);
   bindSegments(); bindControls(); bindTransport(); bindTimeline(); bindKeys();
@@ -117,10 +126,13 @@ function prepDuration() {
 // ---- 偏好持久化 ----
 async function loadPrefs() { const { editorPrefs } = await chrome.storage.local.get('editorPrefs'); return editorPrefs || {}; }
 function savePrefs() {
+  const camera = camCfg
+    ? { x: camCfg.x, y: camCfg.y, size: camCfg.size, shape: camCfg.shape, beauty: camCfg.beauty, mirror: camCfg.mirror, ring: camCfg.ring }
+    : savedCamPrefs;
   chrome.storage.local.set({ editorPrefs: {
     skinId: currentSkinId, padding: cfg.padding, radius: cfg.radius, shadow: cfg.shadow,
     background: cfg.background.id, autoZoom: cfg.autoZoom, zoomLevel: cfg.zoomLevel,
-    clickFx: cfg.clickFx, cursor: cfg.cursor,
+    clickFx: cfg.clickFx, cursor: cfg.cursor, camera,
   } });
 }
 
@@ -204,6 +216,16 @@ function curCfg() { return beautify ? cfg : RAW; }
 function render() {
   if (!ctx || exporting) return;
   drawScene(ctx, video, video.currentTime * 1000, curCfg(), data, W, H);
+  if (camVideo && camCfg) drawCamera(ctx, camVideo, camCfg, W, H);
+}
+
+// ---- 摄像头轨同步:摄像头时间 = 屏幕源时间 - 起点偏移 ----
+function camTimeFor(srcMs) { return Math.max(0, Math.min(camDur - 30, srcMs - camOffset)) / 1000; }
+// 暂停态强制对齐;播放态只纠 >150ms 的漂移,避免每帧 seek 卡顿
+function syncCam(force = false) {
+  if (!camVideo) return;
+  const want = camTimeFor(video.currentTime * 1000);
+  if (force || Math.abs(camVideo.currentTime - want) > 0.15) camVideo.currentTime = want;
 }
 
 function frame() {
@@ -223,14 +245,19 @@ function frame() {
           video.currentTime = playSrc / 1000; video.playbackRate = segments[playIdx].speed;
         } else { playSrc = seg.e; finishPlayback(); }
       } else { playSrc = src; }
+      if (camVideo) {
+        if (camVideo.paused) camVideo.play().catch(() => {});
+        if (camVideo.playbackRate !== video.playbackRate) camVideo.playbackRate = video.playbackRate;
+        syncCam();
+      }
     }
   }
   render(); syncTimeline();
 }
 
-function finishPlayback() { playing = false; video.pause(); $('play').textContent = '▶'; }
-function pausePlayback() { if (playing) { playing = false; video.pause(); $('play').textContent = '▶'; } }
-function seekVideo(ms) { const t = Math.max(0, Math.min(videoDur - 30, ms)) / 1000; if (isFinite(t)) video.currentTime = t; }
+function finishPlayback() { playing = false; video.pause(); if (camVideo) camVideo.pause(); $('play').textContent = '▶'; }
+function pausePlayback() { if (playing) { playing = false; video.pause(); if (camVideo) camVideo.pause(); $('play').textContent = '▶'; } }
+function seekVideo(ms) { const t = Math.max(0, Math.min(videoDur - 30, ms)) / 1000; if (isFinite(t)) { video.currentTime = t; if (camVideo) camVideo.currentTime = camTimeFor(t * 1000); } }
 
 function syncTimeline() {
   const dur = videoDur || 1;
@@ -271,7 +298,7 @@ async function buildFilmstrip() {
     try { sctx.drawImage(video, i * tw, 0, tw, th); } catch (_) {}
   }
   try { $('filmstrip').style.backgroundImage = `url(${strip.toDataURL('image/jpeg', 0.62)})`; } catch (_) {}
-  await seekTo(playSrc / 1000); render(); syncTimeline();
+  await seekTo(playSrc / 1000); syncCam(true); render(); syncTimeline();
 }
 
 // ---- 播放控制 ----
@@ -341,12 +368,94 @@ function bindTimeline() {
   });
   wrap.addEventListener('dblclick', () => { sel = { a: 0, b: videoDur }; syncSelBar(); syncTimeline(); });
 
+  // 自动剪空白:没有操作也没有声音的片段一键剪掉
+  wireSeg('idleSeg', (v) => { idleThreshold = +v; }, 'idle');
+  $('autoTrim').onclick = trimIdle;
+
   $('selDelete').onclick = () => { if (sel) { pushHistory(); deleteRange(sel.a, sel.b); sel = null; recompute(); afterEdit(); } };
   $('selClear').onclick = () => { sel = null; syncSelBar(); syncTimeline(); };
   wireSeg('selSpeedSeg', (v) => { if (sel) { pushHistory(); setSpeedRange(sel.a, sel.b, +v); recompute(); afterEdit(); } }, 'sp');
   $('resetEdits').onclick = () => { pushHistory(); segments = [{ s: 0, e: videoDur, speed: 1 }]; sel = null; recompute(); afterEdit(); };
 }
 function afterEdit() { syncSelBar(); seekPreview(Math.min(playSrc, videoDur)); }
+
+// ---- 自动剪空白 ----
+// 活动信号取并集:光标移动 / 点击 / 键盘·滚轮心跳 / 音频能量(有声音=有内容,网页在播视频时不会被误剪)。
+// 连续 ≥ idleThreshold 没有任何信号即空白段,两端各留呼吸边距再剪。
+let idleThreshold = 3000;
+const IDLE_PAD = 400;       // 剪切边距:保住空白前后的最后一拍动作/话音尾
+const IDLE_MIN_CUT = 800;   // 剪出来不足 0.8s 的碎段不值得剪
+
+// 音频活动时间点:按 100ms 窗算 RMS,阈值取「底噪 ×3」与绝对下限的较大者(纯静音底噪≈0 → 不会把噪声当说话)
+async function audioActiveTimes() {
+  if (!recMeta.hasAudio) return [];
+  try {
+    const arr = await rawBlob.arrayBuffer();
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = await ac.decodeAudioData(arr);
+    ac.close();
+    const ch = buf.getChannelData(0);
+    const sr = buf.sampleRate, win = Math.round(sr * 0.1);
+    const n = Math.floor(ch.length / win);
+    if (!n) return [];
+    const rms = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = 0; const o = i * win;
+      for (let j = 0; j < win; j += 4) s += ch[o + j] * ch[o + j];
+      rms[i] = Math.sqrt(s / (win / 4));
+    }
+    const sorted = Float32Array.from(rms).sort();
+    const floor = sorted[Math.floor(n * 0.2)];
+    const th = Math.max(0.01, floor * 3);
+    const times = [];
+    for (let i = 0; i < n; i++) if (rms[i] > th) times.push(i * 100 + 50);
+    return times;
+  } catch (e) { console.warn('音频活动分析失败,仅按操作轨迹判定:', e.message); return []; }
+}
+
+// 在源时间轴上找空白区间,并与现存保留片段求交(已删掉的部分不重复计数)
+function findIdleRanges(minIdleMs, audioTimes) {
+  const ts = [];
+  for (const c of data.cursor) ts.push(c.t);
+  for (const c of data.clicks) ts.push(c.t);
+  for (const t of data.acts) ts.push(t);
+  for (const t of audioTimes) ts.push(t);
+  ts.sort((a, b) => a - b);
+  const gaps = [];
+  let prev = 0;
+  for (const t of ts) {
+    if (t - prev >= minIdleMs) gaps.push([prev, t]);
+    if (t > prev) prev = t;
+  }
+  if (videoDur - prev >= minIdleMs) gaps.push([prev, videoDur]);
+  const out = [];
+  for (const [a, b] of gaps) {
+    // 只在内侧留边距:头尾贴边的空白(开播前/收尾后)整段剪掉
+    const a2 = a <= 1 ? 0 : a + IDLE_PAD;
+    const b2 = b >= videoDur - 1 ? videoDur : b - IDLE_PAD;
+    for (const seg of segments) {
+      const lo = Math.max(a2, seg.s), hi = Math.min(b2, seg.e);
+      if (hi - lo >= IDLE_MIN_CUT) out.push([lo, hi]);
+    }
+  }
+  return out;
+}
+
+async function trimIdle() {
+  const btn = $('autoTrim');
+  if (btn.dataset.busy) return;
+  btn.dataset.busy = '1'; btn.textContent = '分析中…';
+  const audio = await audioActiveTimes();
+  const ranges = findIdleRanges(idleThreshold, audio);
+  delete btn.dataset.busy; btn.textContent = '剪除空白';
+  const info = $('trimInfo');
+  if (!ranges.length) { info.textContent = `没有 ≥${idleThreshold / 1000}s 的空白段(操作和声音都算「有内容」)`; return; }
+  pushHistory();
+  let total = 0;
+  for (const [a, b] of ranges) { deleteRange(a, b); total += b - a; }
+  sel = null; recompute(); afterEdit();
+  info.textContent = `已剪除 ${ranges.length} 段空白 · 共 ${(total / 1000).toFixed(1)}s(⌘Z 可撤销)`;
+}
 // ---- 撤销 ----
 function pushHistory() { history.push(JSON.stringify(segments)); if (history.length > 40) history.shift(); }
 function undo() { if (!history.length) return; segments = JSON.parse(history.pop()); sel = null; recompute(); afterEdit(); }
@@ -396,25 +505,31 @@ function syncBeautifyUI() {
 // ---- 面板 ----
 function buildBgChips() {
   const wrap = $('bgChips'); wrap.innerHTML = '';
-  let lastGroup = null;
+  // 壁纸大图卡两列铺开,名字走 tooltip;「不要背景」是顶部一条窄条(BACKGROUNDS[0])
   BACKGROUNDS.forEach((b) => {
-    // 分组小标题(深色/浅色),让一排色块看起来是策划过的,不是堆一起
-    const group = b.type === 'none' ? null : (b.light ? 'light' : 'dark');
-    if (group && group !== lastGroup) {
-      const h = document.createElement('div'); h.className = 'chip-group'; h.textContent = group === 'dark' ? '深色' : '浅色';
-      wrap.appendChild(h); lastGroup = group;
-    }
-    const el = document.createElement('div'); el.className = 'chip'; el.style.background = bgCss(b); el.dataset.bg = b.id; el.title = b.name;
-    el.innerHTML = `<span class="nm">${b.name}</span>`;
-    el.onclick = () => { cfg.background = b; markBg(b.id); savePrefs(); render(); };
+    const el = document.createElement('div');
+    el.className = 'chip' + (b.type === 'none' ? ' none' : '');
+    el.dataset.bg = b.id; el.title = b.name;
+    const pv = document.createElement('div'); pv.className = 'pv';
+    if (b.type === 'image') pv.style.backgroundImage = `url(${chrome.runtime.getURL(b.file)})`;
+    el.append(pv);
+    el.onclick = () => { cfg.background = b; preloadBackground(b).then(render); markBg(b.id); savePrefs(); render(); };
     wrap.appendChild(el);
   });
 }
 function markBg(v) { document.querySelectorAll('#bgChips .chip').forEach((c) => c.classList.toggle('sel', c.dataset.bg === v)); }
 
+// 滑杆进度填充:已走过的轨道涂强调色(CSS 用 --p 画填充),原生 range 做不到
+const RANGE_IDS = ['padding', 'radius', 'shadow', 'zoomLevel'];
+function paintRange(el) {
+  const min = +el.min || 0, max = +el.max || 100;
+  el.style.setProperty('--p', ((el.value - min) / (max - min)) * 100 + '%');
+}
+
 function bindControls() {
   const rr = () => { savePrefs(); render(); };
   const on = (i, ev, fn) => $(i).addEventListener(ev, fn);
+  RANGE_IDS.forEach((id) => on(id, 'input', (e) => paintRange(e.target)));
   on('padding', 'input', (e) => { cfg.padding = +e.target.value / 100; $('vPad').textContent = e.target.value; rr(); });
   on('radius', 'input', (e) => { cfg.radius = +e.target.value; $('vRad').textContent = e.target.value; rr(); });
   on('shadow', 'input', (e) => { cfg.shadow = +e.target.value / 100; $('vSha').textContent = e.target.value; rr(); });
@@ -433,6 +548,76 @@ function syncControls() {
   $('clickFx').checked = cfg.clickFx;
   $('cursorOn').checked = !!cfg.cursor;
   if (cfg.background) markBg(cfg.background.id);
+  RANGE_IDS.forEach((id) => paintRange($(id)));
+}
+
+// ---- 摄像头气泡控件 ----
+function bindCamControls() {
+  $('gCam').hidden = false;
+  const rr = () => { savePrefs(); render(); };
+  $('camShow').onchange = (e) => { camCfg.show = e.target.checked; rr(); };
+  wireSeg('camShapeSeg', (v) => { camCfg.shape = v; clampCam(); rr(); }, 'shape');
+  wireSeg('camPosSeg', (v) => { setCamPos(v); rr(); }, 'pos');
+  $('camSize').addEventListener('input', (e) => { paintRange(e.target); camCfg.size = +e.target.value / 100; $('vCamSize').textContent = e.target.value; clampCam(); rr(); });
+  $('camBeauty').addEventListener('input', (e) => { paintRange(e.target); camCfg.beauty = +e.target.value / 100; $('vCamBeauty').textContent = e.target.value; rr(); });
+  $('camMirror').onchange = (e) => { camCfg.mirror = e.target.checked; rr(); };
+  $('camRing').onchange = (e) => { camCfg.ring = e.target.checked; rr(); };
+  bindCamDrag();
+}
+function syncCamControls() {
+  $('camShow').checked = camCfg.show;
+  $('camSize').value = Math.round(camCfg.size * 100); $('vCamSize').textContent = Math.round(camCfg.size * 100);
+  $('camBeauty').value = Math.round(camCfg.beauty * 100); $('vCamBeauty').textContent = Math.round(camCfg.beauty * 100);
+  $('camMirror').checked = camCfg.mirror; $('camRing').checked = camCfg.ring;
+  document.querySelectorAll('#camShapeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.shape === camCfg.shape));
+  paintRange($('camSize')); paintRange($('camBeauty'));
+}
+// 改大小/形状后把中心拉回画布内,气泡不出界
+function clampCam() {
+  const r = cameraRect(camCfg, camVideo, W, H);
+  camCfg.x = Math.max(r.w / 2 / W, Math.min(1 - r.w / 2 / W, camCfg.x));
+  camCfg.y = Math.max(r.h / 2 / H, Math.min(1 - r.h / 2 / H, camCfg.y));
+}
+// 四角快速摆位(留一圈呼吸边距)
+function setCamPos(key) {
+  const r = cameraRect(camCfg, camVideo, W, H);
+  const m = 0.035 * Math.min(W, H);
+  camCfg.x = key[0] === 'l' ? (r.w / 2 + m) / W : 1 - (r.w / 2 + m) / W;
+  camCfg.y = key[1] === 't' ? (r.h / 2 + m) / H : 1 - (r.h / 2 + m) / H;
+}
+function clearPosSeg() { document.querySelectorAll('#camPosSeg button').forEach((b) => b.classList.remove('on')); }
+// 在预览画布上直接拖动气泡(Screen Studio 式自由摆位)
+function bindCamDrag() {
+  let dragging = false;
+  const toCanvas = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H };
+  };
+  const hit = (p) => {
+    if (!camCfg || !camCfg.show) return false;
+    const r = cameraRect(camCfg, camVideo, W, H);
+    return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+  };
+  canvas.addEventListener('pointermove', (e) => { if (!dragging) canvas.style.cursor = hit(toCanvas(e)) ? 'grab' : ''; });
+  canvas.addEventListener('pointerdown', (e) => {
+    const p = toCanvas(e);
+    if (!hit(p)) return;
+    e.preventDefault(); canvas.setPointerCapture(e.pointerId);
+    dragging = true; canvas.style.cursor = 'grabbing';
+    const dx = camCfg.x - p.x / W, dy = camCfg.y - p.y / H;
+    const mv = (ev) => {
+      const q = toCanvas(ev);
+      camCfg.x = q.x / W + dx; camCfg.y = q.y / H + dy;
+      clampCam(); clearPosSeg(); render();
+    };
+    const up = () => {
+      dragging = false; canvas.style.cursor = 'grab';
+      canvas.releasePointerCapture(e.pointerId);
+      canvas.removeEventListener('pointermove', mv); canvas.removeEventListener('pointerup', up);
+      savePrefs();
+    };
+    canvas.addEventListener('pointermove', mv); canvas.addEventListener('pointerup', up);
+  });
 }
 
 // ---- 导出 ----
@@ -502,7 +687,9 @@ let expCanvas = null, expCtx = null, expW = 0, expH = 0;
 async function drawExportFrame(masterMs) {
   const { sourceMs } = masterToSource(masterMs);
   await seekTo(sourceMs / 1000);
+  if (camVideo && camCfg && camCfg.show) await camSeekTo(camTimeFor(sourceMs));
   drawScene(expCtx, video, sourceMs, curCfg(), data, expW, expH);
+  if (camVideo && camCfg) drawCamera(expCtx, camVideo, camCfg, expW, expH);
 }
 function seekTo(sec) {
   return new Promise((res) => {
@@ -513,11 +700,20 @@ function seekTo(sec) {
     video.addEventListener('seeked', h); video.currentTime = target;
   });
 }
+function camSeekTo(sec) {
+  return new Promise((res) => {
+    if (!camVideo || !(camDur > 0)) return res();
+    const target = Math.max(0, Math.min(sec, camDur / 1000 - 0.001));
+    if (Math.abs(camVideo.currentTime - target) < 0.0005) return res();
+    const h = () => { camVideo.removeEventListener('seeked', h); res(); };
+    camVideo.addEventListener('seeked', h); camVideo.currentTime = target;
+  });
+}
 
 async function doExport() {
   if (exporting) return;
   recompute(); // 确保总时长是最新剪辑结果
-  exporting = true; playing = false; video.pause();
+  exporting = true; playing = false; video.pause(); if (camVideo) camVideo.pause();
   // 按所选尺寸决定导出分辨率(控制体积):原始 / 1080p / 720p,绝不放大
   const targetH = exportSize === '1080' ? 1080 : exportSize === '720' ? 720 : H;
   const sc = Math.min(1, targetH / H);
@@ -527,6 +723,7 @@ async function doExport() {
   $('exportMask').hidden = false; $('exportBar').style.width = '0%';
   $('exportLabel').textContent = '正在导出 ' + fmtSel.toUpperCase() + ' …';
   try {
+    await preloadBackground(curCfg().background); // 壁纸必须就绪,否则导出帧会画成 fallback 纯色
     const audio = fmtSel === 'gif' ? null : await buildAudio();
     const blob = await exportMedia({
       canvas: expCanvas, drawAt: drawExportFrame, durationMs: total, fps: fmtSel === 'gif' ? 12 : 30,
@@ -543,6 +740,7 @@ async function doExport() {
   expCanvas = null; expCtx = null;
   // 恢复预览
   await seekTo(Math.max(0, Math.min(videoDur, playSrc)) / 1000);
+  syncCam(true);
   render(); syncTimeline();
 }
 

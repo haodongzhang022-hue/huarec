@@ -6,7 +6,7 @@
   if (window.__huarecTracker) return;
   window.__huarecTracker = true;
 
-  const state = { active: false, paused: false, startTime: 0, pausedTotal: 0, pauseStart: 0, lastSample: 0, cursor: [], clicks: [] };
+  const state = { active: false, paused: false, startTime: 0, pausedTotal: 0, pauseStart: 0, lastSample: 0, lastAct: 0, cursor: [], clicks: [], acts: [] };
   const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
   const recTime = () => Date.now() - state.startTime - state.pausedTotal;
   // 用 clientWidth/Height(不含滚动条),否则有滚动条的页面 innerWidth 偏大 → 归一化坐标系统性偏左/偏上
@@ -27,12 +27,24 @@
   window.addEventListener('mousemove', onMove, { capture: true, passive: true });
   window.addEventListener('mousedown', onDown, { capture: true, passive: true });
 
+  // 活动心跳:键盘/滚轮也算「有动静」。只记时间戳,绝不记按键内容。
+  // 这是编辑器「自动剪空白」的原料——打字、滚动页面的片段不该被当成空白剪掉。
+  function onAct() {
+    if (!state.active || state.paused) return;
+    const now = Date.now();
+    if (now - state.lastAct < 300) return;
+    state.lastAct = now;
+    state.acts.push(recTime());
+  }
+  window.addEventListener('keydown', onAct, { capture: true, passive: true });
+  window.addEventListener('wheel', onAct, { capture: true, passive: true });
+
   // —— 增量上报:把已采轨迹交给 background 后清空本地,数据所有权在 background ——
   let flushTimer = null;
   function flush() {
-    if (!state.cursor.length && !state.clicks.length) return;
-    const delta = { type: 'TRACK_FLUSH', cursor: state.cursor, clicks: state.clicks };
-    state.cursor = []; state.clicks = [];
+    if (!state.cursor.length && !state.clicks.length && !state.acts.length) return;
+    const delta = { type: 'TRACK_FLUSH', cursor: state.cursor, clicks: state.clicks, acts: state.acts };
+    state.cursor = []; state.clicks = []; state.acts = [];
     try { chrome.runtime.sendMessage(delta).catch(() => {}); } catch (_) {}
   }
   function startFlushTimer() {
@@ -77,7 +89,7 @@
         state.pausedTotal = msg.pausedTotal || 0;
         state.paused = !!msg.paused;
         state.pauseStart = state.paused ? (msg.pausedAt || Date.now()) : 0;
-        if (!sameSession) { state.cursor = []; state.clicks = []; }
+        if (!sameSession) { state.cursor = []; state.clicks = []; state.acts = []; }
         if (msg.enhanceCursor) enhanceCursor(); else restoreCursor();
         startFlushTimer();
         break;
@@ -91,8 +103,8 @@
         break;
       case 'REQUEST_TRACK': {
         // 停止时 background 来收尾:交出最后一段未上报的增量(全量轨迹由 background 合并)
-        const delta = { cursor: state.cursor, clicks: state.clicks };
-        state.cursor = []; state.clicks = [];
+        const delta = { cursor: state.cursor, clicks: state.clicks, acts: state.acts };
+        state.cursor = []; state.clicks = []; state.acts = [];
         sendResponse(delta);
         return true;
       }

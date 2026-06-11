@@ -64,41 +64,45 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
+// ---- 壁纸图片缓存与预加载 ----
+// 壁纸是打包在扩展里的真图片(assets/wallpapers/)。绘帧是同步的,图片解码是异步的:
+// 没就绪时先铺 fallback 主色(本地文件通常一两帧就绪);导出前必须 await preloadBackground。
+const bgImgCache = {};
+export function preloadBackground(bg) {
+  if (!bg || bg.type !== 'image') return Promise.resolve();
+  let c = bgImgCache[bg.id];
+  if (c) return c.promise;
+  const img = new Image();
+  c = { img, ready: false };
+  c.promise = new Promise((res) => {
+    img.onload = () => { c.ready = true; res(); };
+    img.onerror = () => res(); // 加载失败保持 fallback 色,不阻塞
+  });
+  img.src = chrome.runtime.getURL(bg.file);
+  bgImgCache[bg.id] = c;
+  return c.promise;
+}
+
 function paintBackground(ctx, bg, W, H) {
   if (!bg || bg.type === 'none') { ctx.clearRect(0, 0, W, H); return; }
-  if (bg.type === 'solid') {
-    ctx.fillStyle = bg.value; ctx.fillRect(0, 0, W, H);
-  } else if (bg.type === 'aurora') {
-    // ① 多停靠点对角线性渐变作底(macOS 壁纸式的色彩旅程)
-    const gd = bg.grad, rad = (gd.angle || 145) * Math.PI / 180;
-    const cx = W / 2, cy = H / 2, dx = Math.cos(rad) * W, dy = Math.sin(rad) * H;
-    const lg = ctx.createLinearGradient(cx - dx / 2, cy - dy / 2, cx + dx / 2, cy + dy / 2);
-    for (const [pos, color] of gd.stops) lg.addColorStop(pos, color);
-    ctx.fillStyle = lg; ctx.fillRect(0, 0, W, H);
-    // ② 叠大而柔的径向光斑,制造光源与纵深
-    if (bg.blobs) {
-      const maxD = Math.max(W, H);
-      for (const b of bg.blobs) {
-        const r = b.r * maxD;
-        const g = ctx.createRadialGradient(b.cx * W, b.cy * H, 0, b.cx * W, b.cy * H, r);
-        g.addColorStop(0, hexA(b.color, b.alpha != null ? b.alpha : 0.5));
-        g.addColorStop(1, hexA(b.color, 0));
-        ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-      }
+  if (bg.type === 'image') {
+    const c = bgImgCache[bg.id];
+    if (!c) preloadBackground(bg);
+    if (c && c.ready) {
+      // cover 裁切铺满:壁纸已是完成品,不叠暗角不做二次处理
+      const iw = c.img.naturalWidth, ih = c.img.naturalHeight;
+      const s = Math.max(W / iw, H / ih);
+      const dw = iw * s, dh = ih * s;
+      ctx.drawImage(c.img, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    } else {
+      ctx.fillStyle = bg.fallback || '#1c1c1e';
+      ctx.fillRect(0, 0, W, H);
     }
-  } else {
-    const rad = (bg.angle || 155) * Math.PI / 180;
-    const cx = W / 2, cy = H / 2;
-    const dx = Math.cos(rad) * W, dy = Math.sin(rad) * H;
-    const g = ctx.createLinearGradient(cx - dx / 2, cy - dy / 2, cx + dx / 2, cy + dy / 2);
-    g.addColorStop(0, bg.stops[0]); g.addColorStop(1, bg.stops[1]);
-    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    return;
   }
-  // 微弱径向暗角:增加层次感,避免平涂的廉价感。浅色背景几乎不压暗。
-  const vg = ctx.createRadialGradient(W / 2, H * 0.4, Math.min(W, H) * 0.32, W / 2, H / 2, Math.max(W, H) * 0.78);
-  vg.addColorStop(0, 'rgba(0,0,0,0)');
-  vg.addColorStop(1, bg.light ? 'rgba(0,0,0,0.04)' : 'rgba(0,0,0,0.2)');
-  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  // solid 兜底(当前预设未使用,保留通用性)
+  ctx.fillStyle = bg.value || '#1c1c1e';
+  ctx.fillRect(0, 0, W, H);
 }
 
 // 主绘制:画一帧网页内容(含运镜/光标/点击/水印)
@@ -168,6 +172,78 @@ export function drawScene(ctx, video, videoTimeMs, cfg, data, W, H) {
   }
 
   ctx.restore();
+}
+
+// ---- 摄像头气泡:独立于屏幕轨的浮层,预览与导出共用 ----
+// cam: { show, x, y, size, shape:'circle'|'square'|'rect', beauty:0..1, mirror, ring }
+// x/y 是气泡中心(0..1,相对整个画布);size 是相对 min(W,H) 的占比。
+
+// 气泡的画布像素矩形(编辑器拖拽命中测试也用它)
+export function cameraRect(cam, camVideo, W, H) {
+  const d = cam.size * Math.min(W, H);
+  let w = d, h = d;
+  if (cam.shape === 'rect') {
+    // 卡片样式按视频本身宽高比,面积与同 size 的圆形近似(√ar 配平)
+    const ar = camVideo && camVideo.videoWidth ? camVideo.videoWidth / camVideo.videoHeight : 4 / 3;
+    w = d * Math.sqrt(ar); h = d / Math.sqrt(ar);
+  }
+  return { x: cam.x * W - w / 2, y: cam.y * H - h / 2, w, h };
+}
+
+function camShapePath(ctx, r, shape) {
+  if (shape === 'circle') {
+    ctx.beginPath();
+    ctx.ellipse(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
+  } else {
+    roundRect(ctx, r.x, r.y, r.w, r.h, shape === 'square' ? r.w * 0.22 : Math.min(r.w, r.h) * 0.12);
+  }
+}
+
+const camCanvas = document.createElement('canvas');
+export function drawCamera(ctx, camVideo, cam, W, H) {
+  if (!cam || !cam.show || !camVideo || camVideo.readyState < 2) return;
+  const r = cameraRect(cam, camVideo, W, H);
+  const k = W / 1280;
+  // 离屏画一份裁好的画面(cover 裁切 + 镜像 + 美颜),再整体贴回主画布
+  const tw = Math.max(2, Math.round(r.w)), th = Math.max(2, Math.round(r.h));
+  camCanvas.width = tw; camCanvas.height = th;
+  const tctx = camCanvas.getContext('2d');
+  const vw = camVideo.videoWidth, vh = camVideo.videoHeight;
+  const s = Math.max(tw / vw, th / vh);
+  tctx.save();
+  if (cam.mirror) { tctx.translate(tw, 0); tctx.scale(-1, 1); }
+  tctx.drawImage(camVideo, (tw - vw * s) / 2, (th - vh * s) / 2, vw * s, vh * s);
+  tctx.restore();
+  // 美颜 = 柔焦磨皮:把轻度模糊 + 提亮的同画面半透明叠回去,肤色变平滑、五官轮廓仍清晰
+  if (cam.beauty > 0) {
+    tctx.save();
+    tctx.filter = `blur(${((1.5 + 3.5 * cam.beauty) * tw / 240).toFixed(2)}px) brightness(1.06) saturate(1.05)`;
+    tctx.globalAlpha = 0.35 + 0.4 * cam.beauty;
+    tctx.drawImage(camCanvas, 0, 0);
+    tctx.restore();
+  }
+  // 投影
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur = 30 * k;
+  ctx.shadowOffsetY = 10 * k;
+  ctx.fillStyle = '#000';
+  camShapePath(ctx, r, cam.shape); ctx.fill();
+  ctx.restore();
+  // 形状裁剪贴图
+  ctx.save();
+  camShapePath(ctx, r, cam.shape); ctx.clip();
+  ctx.drawImage(camCanvas, r.x, r.y, r.w, r.h);
+  ctx.restore();
+  // 白色描边
+  if (cam.ring) {
+    ctx.save();
+    camShapePath(ctx, r, cam.shape);
+    ctx.lineWidth = 2.5 * k;
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
 // 在轨迹里按时间插值出光标位置(0..1 归一化)

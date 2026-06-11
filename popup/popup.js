@@ -2,11 +2,49 @@ const $ = (id) => document.getElementById(id);
 const fmt = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
 let timer = null;
+let camStream = null;
+
+// 摄像头预览开/关。interactive=false 用于打开弹窗时静默恢复上次勾选:
+// 失败(权限被收回/设备被占用)只悄悄取消勾选,不弹授权页打扰。
+async function setCamPreview(on, interactive) {
+  const v = $('camPreview');
+  if (!on) {
+    if (camStream) camStream.getTracks().forEach((t) => t.stop());
+    camStream = null; v.srcObject = null; v.hidden = true; $('camHint').hidden = true;
+    return true;
+  }
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    v.srcObject = camStream; v.hidden = false; $('camHint').hidden = false;
+    return true;
+  } catch (e) {
+    if (!interactive) return false;
+    // 弹窗里弹原生权限框不可靠(弹窗可能被顶掉)→ 没权限时开一个专门的授权页引导
+    if (e.name === 'NotAllowedError') {
+      chrome.tabs.create({ url: chrome.runtime.getURL('permission.html') });
+      window.close();
+    } else {
+      const err = $('error');
+      err.hidden = false;
+      err.textContent = '无法访问摄像头:' + (e.name === 'NotFoundError' ? '没有检测到摄像头设备' : e.message);
+    }
+    return false;
+  }
+}
 
 async function init() {
-  const { lastAudio, lastCursor } = await chrome.storage.local.get(['lastAudio', 'lastCursor']);
+  const { lastAudio, lastCursor, lastCamera } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera']);
   if (lastAudio === false) $('audio').checked = false;
   if (lastCursor === false) $('cursor').checked = false;
+  if (lastCamera === true) {
+    $('camera').checked = true;
+    setCamPreview(true, false).then((ok) => { if (!ok) $('camera').checked = false; });
+  }
+  $('camera').addEventListener('change', async (e) => {
+    const ok = await setCamPreview(e.target.checked, true);
+    if (!ok) e.target.checked = false;
+    chrome.storage.local.set({ lastCamera: $('camera').checked });
+  });
 
   const st = await chrome.runtime.sendMessage({ type: 'GET_STATE' }).catch(() => ({ status: 'idle' }));
   setView(st || { status: 'idle' });
@@ -63,8 +101,11 @@ async function refresh() {
 async function start() {
   const audio = $('audio').checked;
   const enhanceCursor = $('cursor').checked;
-  chrome.storage.local.set({ lastAudio: audio, lastCursor: enhanceCursor });
-  const res = await chrome.runtime.sendMessage({ type: 'START_RECORDING', options: { audio, enhanceCursor } });
+  const camera = $('camera').checked;
+  chrome.storage.local.set({ lastAudio: audio, lastCursor: enhanceCursor, lastCamera: camera });
+  // 先放掉弹窗占用的摄像头,offscreen 才能稳拿同一台设备
+  await setCamPreview(false);
+  const res = await chrome.runtime.sendMessage({ type: 'START_RECORDING', options: { audio, enhanceCursor, camera } });
   if (res && res.ok) {
     window.close();
   } else {

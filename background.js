@@ -27,9 +27,11 @@ let trackWrite = Promise.resolve();
 function appendTrack(delta) {
   trackWrite = trackWrite.then(async () => {
     const { trackBuf } = await chrome.storage.session.get('trackBuf');
-    const buf = trackBuf || { cursor: [], clicks: [] };
+    const buf = trackBuf || { cursor: [], clicks: [], acts: [] };
+    if (!buf.acts) buf.acts = [];
     if (delta.cursor?.length) buf.cursor.push(...delta.cursor);
     if (delta.clicks?.length) buf.clicks.push(...delta.clicks);
+    if (delta.acts?.length) buf.acts.push(...delta.acts);
     await chrome.storage.session.set({ trackBuf: buf });
   }).catch((e) => console.warn('轨迹暂存失败:', e.message));
   return trackWrite;
@@ -37,9 +39,10 @@ function appendTrack(delta) {
 async function takeTrack() {
   await trackWrite; // 等在途的增量写完
   const { trackBuf } = await chrome.storage.session.get('trackBuf');
-  const buf = trackBuf || { cursor: [], clicks: [] };
+  const buf = trackBuf || { cursor: [], clicks: [], acts: [] };
   buf.cursor.sort((a, b) => a.t - b.t);
   buf.clicks.sort((a, b) => a.t - b.t);
+  buf.acts = (buf.acts || []).sort((a, b) => a - b);
   return buf;
 }
 async function clearTrack() {
@@ -244,6 +247,7 @@ async function stopRecording(opts = {}) {
     if (rec) {
       rec.cursor = track.cursor || [];
       rec.clicks = track.clicks || [];
+      rec.acts = track.acts || [];
       rec.meta = { ...rec.meta, skinId: st.options?.skinId || 'huashu' };
       await saveRecording(rec);
     }
@@ -271,9 +275,9 @@ async function teardown(tabId) {
 async function toggle() {
   const st = await getState();
   if (st.status === 'idle') {
-    // 沿用 popup 里的音频/光标偏好,保证快捷键起录与点按钮一致(默认开)
-    const { lastAudio, lastCursor } = await chrome.storage.local.get(['lastAudio', 'lastCursor']);
-    await startRecording({ audio: lastAudio !== false, enhanceCursor: lastCursor !== false });
+    // 沿用 popup 里的音频/光标/摄像头偏好,保证快捷键起录与点按钮一致(音频/光标默认开,摄像头默认关)
+    const { lastAudio, lastCursor, lastCamera } = await chrome.storage.local.get(['lastAudio', 'lastCursor', 'lastCamera']);
+    await startRecording({ audio: lastAudio !== false, enhanceCursor: lastCursor !== false, camera: lastCamera === true });
   } else await stopRecording();
 }
 
