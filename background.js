@@ -1,7 +1,7 @@
 // HuaRec 后台编排器(MV3 service worker, module)。
 // 职责:接 popup/快捷键指令 → 取 tabCapture streamId → 拉起 offscreen 录制 →
 // 注入控制条 content script → 停止时合并光标轨迹 → 存库 → 打开编辑器。
-import { saveRecording, getRecording } from './lib/db.js';
+import { saveRecording, getRecording, getSessions, getSessionChunks, deleteSession } from './lib/db.js';
 
 const OFFSCREEN_PATH = 'offscreen.html';
 
@@ -236,8 +236,12 @@ async function stopRecording(opts = {}) {
   try {
     stopped = await askOffscreen({ type: 'OFFSCREEN_STOP' }, 'OFFSCREEN_STOPPED', 20000);
   } catch (e) {
-    await teardown(st.tabId);
-    return { ok: false, error: e.message };
+    stopped = { id: null, error: e.message };
+  }
+  if (!stopped.id) {
+    // offscreen 没能正常收尾(死亡/无响应)→ 切片本来就逐秒落库,直接拼出成片,数据不丢
+    const salvagedId = await salvageFromChunks().catch((e) => { console.warn('切片抢救失败:', e.message); return null; });
+    if (salvagedId) stopped = { id: salvagedId };
   }
   if (!stopped.id) {
     await teardown(st.tabId);
@@ -318,6 +322,37 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   else chrome.action.setBadgeText({ text: '⇄' });
 });
 
+// 兜底抢救:offscreen 已死/无响应时,用已落库的切片直接拼出成片(WebM 流式格式,半截可播)
+async function salvageFromChunks() {
+  const sessions = await getSessions();
+  if (!sessions.length) return null;
+  const s = sessions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
+  const rows = await getSessionChunks(s.session);
+  const screen = rows.filter((r) => r.track === 'screen').map((r) => r.data);
+  if (!screen.length) return null;
+  const meta = { ...(s.meta || {}), createdAt: s.createdAt, durationMs: 0, recovered: true };
+  const rec = {
+    id: 'rec_' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+    blob: new Blob(screen, { type: 'video/webm' }),
+    cursor: [], clicks: [], acts: [], keys: [], meta,
+  };
+  const camParts = rows.filter((r) => r.track === 'cam').map((r) => r.data);
+  if (camParts.length) {
+    rec.camBlob = new Blob(camParts, { type: 'video/webm' });
+    meta.hasCam = true;
+    meta.camOffsetMs = s.camStartTime && s.startTime ? s.camStartTime - s.startTime : 0;
+  }
+  const micParts = rows.filter((r) => r.track === 'mic').map((r) => r.data);
+  if (micParts.length) {
+    rec.micBlob = new Blob(micParts, { type: 'audio/webm' });
+    meta.hasMic = true;
+    meta.micOffsetMs = s.micStartTime && s.startTime ? s.micStartTime - s.startTime : 0;
+  }
+  await saveRecording(rec);
+  await deleteSession(s.session).catch(() => {});
+  return rec.id;
+}
+
 async function teardown(tabId) {
   if (tabId) chrome.tabs.sendMessage(tabId, { type: 'REC_TEARDOWN' }).catch(() => {});
   await closeOffscreen();
@@ -363,6 +398,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         switchToTab(tab.id).then(sendResponse);
       });
       return true;
+    case 'OFFSCREEN_STOPPED':
+      // 非主动停止(编码器死亡时 offscreen 自动收尾)→ 这里善后:合并轨迹、清状态、打开编辑器。
+      // 正常停止时状态已是 saving(askOffscreen 在等这条消息),这里直接让路。
+      if (msg.target === 'background' && msg.id) {
+        getState().then(async (st) => {
+          if (st.status !== 'recording' && st.status !== 'paused') return;
+          await setState({ status: 'saving' });
+          if (st.tabId) {
+            try {
+              const resp = await chrome.tabs.sendMessage(st.tabId, { type: 'REQUEST_TRACK' });
+              if (resp) await appendTrack(resp);
+            } catch (_) {}
+          }
+          const track = await takeTrack();
+          try {
+            const rec = await getRecording(msg.id);
+            if (rec) {
+              rec.cursor = track.cursor || []; rec.clicks = track.clicks || [];
+              rec.acts = track.acts || []; rec.keys = track.keys || [];
+              rec.meta = { ...rec.meta, skinId: st.options?.skinId || 'huashu', autoStopped: true };
+              await saveRecording(rec);
+            }
+          } catch (_) {}
+          await teardown(st.tabId);
+          chrome.tabs.create({ url: chrome.runtime.getURL(`editor/editor.html?id=${msg.id}`) });
+        });
+      }
+      return false;
     case 'TRACK_FLUSH':
       // 只收被录标签页的增量(防其他页面残留的旧 tracker 串数据)
       getState().then((st) => {

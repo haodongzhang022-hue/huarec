@@ -84,18 +84,63 @@ async function captureTab(streamId) {
   }
 }
 
-// 把一个标签页流接上中转轨(首次接入和切换共用)。旧上游停掉,新上游开泵。
-function plugTab(s) {
-  const my = ++pumpId;
+// ---- 帧归一:接力的两大杀手是「帧尺寸中途变化」(VP9 编码器直接报错暴毙)和
+// 「时间戳倒退」(新流时钟落后 → 管线卡死)。所有帧统一整形到首流尺寸 + 单调时间戳。
+let relayW = 0, relayH = 0;   // 首流尺寸,全程锁定
+let lastTs = -1;              // 已写入的最大时间戳(µs)
+let scaleCanvas = null;
+function conformFrame(frame) {
+  const sizeOk = frame.displayWidth === relayW && frame.displayHeight === relayH;
+  const tsOk = frame.timestamp > lastTs;
+  if (sizeOk && tsOk) { lastTs = frame.timestamp; return frame; }
+  // 重绘整形:contain 居中不变形;时间戳倒退就续上(+16ms)
+  if (!scaleCanvas) scaleCanvas = new OffscreenCanvas(relayW, relayH);
+  const c = scaleCanvas.getContext('2d');
+  c.fillStyle = '#000'; c.fillRect(0, 0, relayW, relayH);
+  const s = Math.min(relayW / frame.displayWidth, relayH / frame.displayHeight);
+  const dw = frame.displayWidth * s, dh = frame.displayHeight * s;
+  c.drawImage(frame, (relayW - dw) / 2, (relayH - dh) / 2, dw, dh);
+  const ts = tsOk ? frame.timestamp : lastTs + 16000;
+  const out = new VideoFrame(scaleCanvas, { timestamp: ts });
+  frame.close();
+  lastTs = ts;
+  return out;
+}
+
+// 把一个标签页流接上中转轨(首次接入和切换共用)。
+// 关键顺序:先等新流吐出第一帧(验活),才切泵、停旧流 —— 新流是死的就抛错,旧录制毫发无伤。
+async function plugTab(s) {
   const track = s.getVideoTracks()[0];
   const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+  let first;
+  try {
+    first = await Promise.race([
+      reader.read(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('新标签页 4 秒内没有画面帧')), 4000)),
+    ]);
+  } catch (e) {
+    try { reader.cancel(); } catch (_) {}
+    s.getTracks().forEach((t) => t.stop());
+    throw e;
+  }
+  if (!first || first.done) {
+    s.getTracks().forEach((t) => t.stop());
+    throw new Error('新标签页画面流已结束');
+  }
+  // 新流已验活 → 正式换轨
+  const my = ++pumpId;
+  if (!relayW) {
+    const vset = track.getSettings();
+    relayW = (vset.width || 1280) & ~1; relayH = (vset.height || 720) & ~1;
+  }
+  try { await genWriter.write(conformFrame(first.value)); } catch (_) {}
   (async () => {
     while (true) {
       let r;
       try { r = await reader.read(); } catch (_) { break; }
       if (r.done) break;
       if (pumpId !== my) { r.value.close(); break; }
-      try { await genWriter.write(r.value); } catch (_) { r.value.close(); break; }
+      try { await genWriter.write(conformFrame(r.value)); } catch (_) { break; }
     }
     try { reader.cancel(); } catch (_) {}
   })();
@@ -126,7 +171,8 @@ async function start(streamId, options) {
     audioDest = hasAudioOpt ? audioCtx.createMediaStreamDestination() : null;
     recStream = new MediaStream([videoGen]);
     if (audioDest) audioDest.stream.getAudioTracks().forEach((t) => recStream.addTrack(t));
-    plugTab(tabStream);
+    relayW = 0; relayH = 0; lastTs = -1;
+    await plugTab(tabStream);
   } else {
     // 老环境兜底:直接录 tabCapture 流(不支持跨标签页接力)
     recStream = tabStream;
@@ -141,7 +187,7 @@ async function start(streamId, options) {
   meta = {
     width: vset.width || 1280,
     height: vset.height || 720,
-    hasAudio: !!audio,
+    hasAudio: hasAudioOpt,
     hiddenCursor: options.smoothCursor === true, // 真实光标已缩成小点,编辑器默认开补画
     createdAt: Date.now(),
   };
@@ -204,6 +250,12 @@ async function start(streamId, options) {
     reply('OFFSCREEN_STARTED', { startTime });
   };
   recorder.onstop = onStop;
+  // 编码器中途暴毙(理论上已被帧归一挡住,这是最后防线):立即收尾保存已录内容,
+  // 不等用户点停止。background 收到非「saving」态的 OFFSCREEN_STOPPED 会自动善后。
+  recorder.onerror = (e) => {
+    console.error('MediaRecorder 错误,自动收尾保存:', e.error?.message || e);
+    if (recorder && recorder.state !== 'inactive') { try { recorder.stop(); } catch (_) {} }
+  };
   recorder.start(1000); // 每秒切片,流式落库,长录制内存恒定
 }
 
@@ -298,10 +350,10 @@ chrome.runtime.onMessage.addListener((msg) => {
       reply('OFFSCREEN_RESUMED');
       break;
     case 'OFFSCREEN_SWITCH':
-      // 跨标签页接力:对新标签页取流,换到中转轨上游;失败则保持录原页
+      // 跨标签页接力:对新标签页取流、验活后换上游;任何一步失败都保持录原页
       (async () => {
         if (!canRelay || !videoGen) throw new Error('当前环境不支持跨标签页接力');
-        plugTab(await captureTab(msg.streamId));
+        await plugTab(await captureTab(msg.streamId));
       })()
         .then(() => reply('OFFSCREEN_SWITCHED'))
         .catch((e) => reply('OFFSCREEN_SWITCHED', { error: e.message }));
