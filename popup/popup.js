@@ -130,15 +130,26 @@ function setView(st) {
       if (tab && tab.id !== st.tabId && /^(https?|file):/i.test(tab.url || '')) {
         // 自动接力：弹窗已打开 → 该标签页完成了扩展授权 → 直接切
         try {
-          const r = await chrome.runtime.sendMessage({ type: 'SWITCH_RECORDING' });
+          let r = await chrome.runtime.sendMessage({ type: 'SWITCH_RECORDING' });
           if (r && r.ok) {
-            // 切换成功：更新 UI 然后自动关弹窗
-            refresh();
+            // 切换成功：直接关弹窗（无需 refresh，避免在已关窗的 DOM 上操作）
             window.close();
             return;
           }
-        } catch (_) {}
-        // 自动接力失败 → 展示引导文案 + 手动按钮
+          // background 可能正在 onActivated 切换中（switching=true），稍等重试一次
+          if (r?.error?.includes('正在切换中')) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            r = await chrome.runtime.sendMessage({ type: 'SWITCH_RECORDING' });
+            if (r && r.ok) {
+              window.close();
+              return;
+            }
+          }
+          // 自动接力失败 → 记录原因并展示引导文案 + 手动按钮
+          console.warn('自动切换失败:', r?.error);
+        } catch (e) {
+          console.warn('自动切换异常:', e);
+        }
         $('switchGuide').hidden = false;
         $('switchHere').hidden = false;
       }

@@ -323,24 +323,23 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
     lastAutoSwitchFailed = 0;
     chrome.action.setBadgeText({ text: st.status === 'paused' ? 'II' : 'REC' });
   } else {
+    // 角标统一在分支外设置，避免双写遗漏（见审查问题 1）
     const now = Date.now();
     // 30 秒内不重复弹通知,避免切来切去刷屏
     if (now - lastAutoSwitchFailed > 30000) {
       lastAutoSwitchFailed = now;
-      chrome.action.setBadgeText({ text: '⇄' });
       try {
         chrome.notifications.create('huarec-switch-fail', {
           type: 'basic',
-          iconUrl: 'icons/icon128.png',
+          iconUrl: chrome.runtime.getURL('icons/icon128.png'),
           title: 'HuaRec 录制仍在继续',
           message: '录制仍在原标签页进行，点击扩展图标即可切到当前页',
           priority: 2,
           isClickable: true,
         });
       } catch (_) {}
-    } else {
-      chrome.action.setBadgeText({ text: '⇄' });
     }
+    chrome.action.setBadgeText({ text: '⇄' });
   }
 });
 
