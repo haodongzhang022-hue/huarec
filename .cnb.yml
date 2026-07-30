@@ -1,83 +1,42 @@
 # HuaRec 花录 — Chrome 扩展全自动发版流水线
 #
-# 流程说明（核心目标：类似成熟开源仓库的 Release 体验 —— 非常自动、非常醒目）：
+# 核心目标（对齐 huashu-design 仓库体验）：非常自动、非常醒目。
 #
 #   1. master push（每次更新）:
-#        自动递增 patch 版本号 → 打包插件 zip → 自动打 tag(vX.Y.Z) 并推送
-#        → 自动创建 Release → zip 挂载为 Release 附件
-#        → 自动提交版本号更新回 master（[skip ci]，不触发新一轮流水线）
-#      用户打开仓库「发行版 / Releases」页即可看到最新版本 + 醒目的 zip 下载按钮，
-#      全程零人工操作。
+#        运行 scripts/release-latest.sh：
+#          自动递增 patch 版本号（manifest.json 为唯一版本源）
+#          → 打包插件 zip（仅插件运行所需文件）
+#          → 创建/更新稳定 tag（latest）的 Release，zip 作为附件覆盖上传
+#          → Release 描述维护最新版本 + 安装指引 + 更新日志 + 永久下载直链
+#          → 版本号 bump 自动提交回 master（[skip ci]，不触发新一轮流水线）
+#      用户打开仓库「发行版 / Releases」页即可看到置顶的最新版本与醒目 zip
+#      下载按钮，全程零人工操作。
 #
-#   2. tag_push(v*)（手动打 tag 发版）:
-#        打包 zip → 创建 Release → zip 挂载为 Release 附件（与自动流程一致的体验）
+#   2. tag_push(v*)（手动打 tag 发正式版）:
+#        打包 zip → 创建该 tag 的 Release → zip 挂载为 Release 附件，
+#        用于里程碑式正式版本，与 latest 自动通道互不干扰。
 #
 #   3. CI 失败自动修复:
 #        上述流水线任一环节报错时，failStages 自动唤醒 NPC 读取失败日志、
-#        尝试修复并推送新提交，全程无需人工介入
+#        尝试修复并推送新提交，全程无需人工介入。
 #
-# zip 内只保留浏览器插件运行所需文件（manifest.json / js / html / css /
-# icons / 壁纸 / 第三方库），剔除开发脚本、原始素材、文档等无关内容。
-#
-# 附件上传使用官方插件 cnbcool/attachments（Node 镜像，自带上传逻辑），
-# 在 tag_push 事件下会自动将文件挂载到同 tag 的 Release 上。
+# 附件上传走 cnb CLI（post-release-asset-upload-url → PUT → 确认），
+# 即 huashu-design 仓库实测可靠的方案，支持同名覆盖，永保 latest 附件为最新版。
 
 include:
-  - .ci/release-scripts.yml
   - .ci/auto-fix.yml
 
-# ── master push：全自动发版（版本号递增 + tag + Release + zip 附件）──
+# ── master push：全自动发版（版本号递增 + latest Release + zip 附件覆盖）──
 master:
   push:
     - name: auto-release
+      docker:
+        # 从 Dockerfile 构建（node:22-slim + git/curl/jq/zip/cnb-cli），平台自动缓存
+        build:
+          dockerfile: ./Dockerfile
       stages:
-        - name: install-deps
-          script: |
-            apt-get update && apt-get install -y --no-install-recommends zip git ca-certificates
-        # 1) 自动递增 patch 版本号，通过 exports 把 NEXT_VERSION / NEXT_TAG 传给后续 stage
-        - name: bump-version
-          script: !reference [.bump-version-script]
-          exports:
-            NEXT_VERSION: NEXT_VERSION
-            NEXT_TAG: NEXT_TAG
-        # 2) 打包插件 zip（manifest.json 已是新版本号）
-        - name: pack-extension-zip
-          script: !reference [.pack-script]
-        # 3) 生成 Release 更新说明（最近 10 条提交）
-        - name: write-release-notes
-          script: !reference [.release-notes-script]
-        # 4) 创建 Release（tag 不存在时自动创建并推送）
-        - name: create-release
-          type: git:release
-          options:
-            tag: $NEXT_TAG
-            descriptionFromFile: RELEASE_NOTES.md
-        # 5) zip 挂载为 Release 附件（tag_push 上下文下插件自动挂到同 tag 的 Release）
-        - name: upload-release-asset
-          image: cnbcool/attachments:latest
-          settings:
-            attachments:
-              - "./*.zip"
-        # 6) 把版本号更新提交回 master，[skip ci] 防止循环触发
-        - name: commit-version-bump
-          script: |
-            git config user.name "cnb-bot"
-            git config user.email "bot@cnb.cool"
-            git add manifest.json
-            if git diff --cached --quiet; then
-              echo ">>> manifest.json 无变化，跳过提交"
-            else
-              git commit -m "chore(release): 自动发版 $NEXT_TAG — 版本号递增 [skip ci]"
-              git push "https://oauth2:${CNB_TOKEN}@$CNB_WEB_HOST/$CNB_REPO_SLUG.git" HEAD:master
-              echo ">>> 版本号已提交回 master: $NEXT_VERSION"
-            fi
-        - name: print-release-url
-          script: |
-            echo "=============================================="
-            echo ">>> 🎉 Release $NEXT_TAG 已自动发布"
-            echo ">>> 查看/下载: https://$CNB_WEB_HOST/$CNB_REPO_SLUG/-/releases"
-            echo ">>> zip 直链:  https://$CNB_WEB_HOST/$CNB_REPO_SLUG/-/releases/download/$NEXT_TAG/huarec-$NEXT_VERSION.zip"
-            echo "=============================================="
+        - name: auto-release-latest
+          script: bash scripts/release-latest.sh
       # ── CI 报错自动处理：失败后唤醒 NPC 自动诊断修复 ──
       failStages:
         - name: auto-fix-ci-failure
@@ -87,37 +46,36 @@ master:
             systemPrompt: !reference [.auto-fix-system-prompt]
             userPrompt: !reference [.auto-fix-user-prompt]
 
-# ── Tag(v*)：手动打 tag 发版（与自动流程一致的 Release 体验）──
+# ── Tag(v*)：手动打 tag 发正式版（里程碑版本，与 latest 自动通道并存）──
 "$":
   tag_push:
     - name: release-extension
+      docker:
+        build:
+          dockerfile: ./Dockerfile
       stages:
-        - name: install-deps
-          script: |
-            apt-get update && apt-get install -y --no-install-recommends zip
         - name: pack-extension-zip
-          script: !reference [.pack-script]
-        - name: write-release-notes
           script: |
+            set -e
             VERSION=$(grep -o '"version"[^,]*' manifest.json | cut -d'"' -f4)
-            cat > RELEASE_NOTES.md <<EOF
-            ## HuaRec 花录 ${CNB_BRANCH}
-
-            Chrome 浏览器扩展安装包 \`huarec-${VERSION}.zip\` 已挂载在本 Release 的附件中，可直接下载。
-
-            ### 安装方式
-            1. 下载并解压 zip 到本地目录（解压后目录内应直接包含 \`manifest.json\`）
-            2. 打开 Chrome，访问 \`chrome://extensions/\`
-            3. 开启右上角「开发者模式」
-            4. 点击「加载已解压的扩展程序」，选择解压后的目录
-            EOF
-        # 关键顺序：先创建 Release，再把 zip 作为 Release 附件上传，
-        # 这样 Release 页面会直接展示 zip 供用户下载
+            echo ">>> manifest version: $VERSION"
+            STAGE_DIR="huarec-$VERSION"
+            ZIP_NAME="huarec-$VERSION.zip"
+            rm -rf "$STAGE_DIR" "$ZIP_NAME"
+            mkdir -p "$STAGE_DIR"
+            cp manifest.json background.js offscreen.html offscreen.js permission.html permission.js "$STAGE_DIR"/
+            cp -r content editor icons lib popup assets "$STAGE_DIR"/
+            rm -f "$STAGE_DIR/icons/make_icons.py"
+            rm -rf "$STAGE_DIR/assets/wallpapers/_raw"
+            (cd "$STAGE_DIR" && zip -q -r "../$ZIP_NAME" .)
+            ls -lh "$ZIP_NAME"
+        # 先创建 Release，再把 zip 挂载为 Release 附件，
+        # Release 页面会直接展示醒目的 zip 下载
         - name: create-release
           type: git:release
           options:
             tag: $CNB_BRANCH
-            descriptionFromFile: RELEASE_NOTES.md
+            description: "HuaRec 花录 $CNB_BRANCH 正式版。zip 安装包已挂载在本 Release 附件中，下载解压后于 chrome://extensions/ 加载即可。"
         - name: upload-release-asset
           image: cnbcool/attachments:latest
           settings:
