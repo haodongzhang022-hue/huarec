@@ -1,5 +1,7 @@
 # HuaRec 花录 · 电影感网页录屏
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 一键起录、本地秒存、自带电影感运镜与 macOS 风背景的 Chrome 网页录屏插件。
 
 ## 项目基础信息
@@ -82,3 +84,9 @@ lib/vendor/fix-webm-duration.mjs   MIT 三方库:给 MediaRecorder 产出的 Web
 lib/vendor/mediapipe/   MediaPipe tasks-vision + 自拍分割模型(本地运行,背景虚化用,~10MB)
 assets/wallpapers/      8 张内置壁纸(GPT-image 生成,jpg;_raw/ 存原始 png,不参与运行)
 ```
+
+## 开源许可
+
+本项目基于 [MIT License](LICENSE) 开源,可自由使用、修改与分发。
+
+> 说明:`lib/vendor/` 下的第三方库(`fix-webm-duration.mjs`、MediaPipe tasks-vision)分别遵循其各自的原始许可,详见对应文件头部或上游仓库。
