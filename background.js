@@ -312,14 +312,25 @@ async function switchToTab(tabId) {
 
 // 录制中用户切换了标签页 → 自动接力跟过去。
 // Chrome 对「没在上面点过扩展」的标签页可能拒绝取流:失败就保持录原页,
-// 角标变 ⇄ 提示,在新页上打开 HuaRec 弹窗点「切到当前页」即可手动接力(弹窗即授权)。
+// 角标变 ⇄ + 发浏览器通知提示用户点击扩展图标;点开后 popup 会自动切到当前页。
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   const st = await getState();
   if (st.status !== 'recording' && st.status !== 'paused') return;
   if (tabId === st.tabId) return;
   const r = await switchToTab(tabId);
-  if (r.ok) chrome.action.setBadgeText({ text: st.status === 'paused' ? 'II' : 'REC' });
-  else chrome.action.setBadgeText({ text: '⇄' });
+  if (r.ok) {
+    chrome.action.setBadgeText({ text: st.status === 'paused' ? 'II' : 'REC' });
+  } else {
+    chrome.action.setBadgeText({ text: '⇄' });
+    // P0-2: 自动切换失败 → 发浏览器通知，引导用户点击扩展图标
+    chrome.notifications.create(`huarec-switch-${Date.now()}`, {
+      type: 'basic',
+      iconUrl: '/icons/icon48.png',
+      title: 'HuaRec 花录',
+      message: '录制仍在原标签页进行，点击扩展图标即可切到当前页',
+      priority: 2,
+    }).catch(() => {});
+  }
 });
 
 // 兜底抢救:offscreen 已死/无响应时,用已落库的切片直接拼出成片(WebM 流式格式,半截可播)

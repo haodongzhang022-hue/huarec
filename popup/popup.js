@@ -89,6 +89,16 @@ async function init() {
   });
 
   const st = await chrome.runtime.sendMessage({ type: 'GET_STATE' }).catch(() => ({ status: 'idle' }));
+
+  // P0-1: 打开 popup 时自动切换 —— 用户点扩展图标 = 该标签页已完成 invoke，取流必成
+  if (st && (st.status === 'recording' || st.status === 'paused') && st.tabId) {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab && tab.id !== st.tabId && /^(https?|file):/i.test(tab.url || '')) {
+      const r = await chrome.runtime.sendMessage({ type: 'SWITCH_RECORDING' }).catch(() => null);
+      if (r && r.ok) { window.close(); return; }
+    }
+  }
+
   setView(st || { status: 'idle' });
 
   $('start').addEventListener('click', start);
@@ -121,11 +131,15 @@ function setView(st) {
   $('live').hidden = !live;
   if (!live) { stopTimer(); return; }
 
-  // 当前标签页 ≠ 被录标签页 → 提供手动接力按钮(自动接力被 Chrome 拒绝时的兜底)
+  // 当前标签页 ≠ 被录标签页 → 展示切换引导 + 手动接力按钮
   $('switchHere').hidden = true;
+  $('switchGuide').hidden = true;
   if (status !== 'saving' && st.tabId) {
     chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-      if (tab && tab.id !== st.tabId && /^(https?|file):/i.test(tab.url || '')) $('switchHere').hidden = false;
+      if (tab && tab.id !== st.tabId && /^(https?|file):/i.test(tab.url || '')) {
+        $('switchHere').hidden = false;
+        $('switchGuide').hidden = false;
+      }
     });
   }
 
