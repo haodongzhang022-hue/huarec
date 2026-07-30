@@ -119,13 +119,29 @@ function setView(st) {
   const live = status === 'recording' || status === 'paused' || status === 'saving';
   $('idle').hidden = live;
   $('live').hidden = !live;
+  $('switchGuide').hidden = true;
   if (!live) { stopTimer(); return; }
 
-  // 当前标签页 ≠ 被录标签页 → 提供手动接力按钮(自动接力被 Chrome 拒绝时的兜底)
+  // 当前标签页 ≠ 被录标签页 → 先尝试自动接力（打开弹窗即完成扩展授权，取流必成），
+  // 只有 auto-switch 也失败才展示手动接力按钮作为最终兜底。
   $('switchHere').hidden = true;
   if (status !== 'saving' && st.tabId) {
-    chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-      if (tab && tab.id !== st.tabId && /^(https?|file):/i.test(tab.url || '')) $('switchHere').hidden = false;
+    chrome.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+      if (tab && tab.id !== st.tabId && /^(https?|file):/i.test(tab.url || '')) {
+        // 自动接力：弹窗已打开 → 该标签页完成了扩展授权 → 直接切
+        try {
+          const r = await chrome.runtime.sendMessage({ type: 'SWITCH_RECORDING' });
+          if (r && r.ok) {
+            // 切换成功：更新 UI 然后自动关弹窗
+            refresh();
+            window.close();
+            return;
+          }
+        } catch (_) {}
+        // 自动接力失败 → 展示引导文案 + 手动按钮
+        $('switchGuide').hidden = false;
+        $('switchHere').hidden = false;
+      }
     });
   }
 
