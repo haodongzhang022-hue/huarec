@@ -34,9 +34,12 @@ master:
         - name: install-deps
           script: |
             apt-get update && apt-get install -y --no-install-recommends zip git ca-certificates
-        # 1) 自动递增 patch 版本号，写入 /tmp/release.env（NEXT_VERSION / NEXT_TAG）
+        # 1) 自动递增 patch 版本号，通过 exports 把 NEXT_VERSION / NEXT_TAG 传给后续 stage
         - name: bump-version
           script: !reference [.bump-version-script]
+          exports:
+            NEXT_VERSION: NEXT_VERSION
+            NEXT_TAG: NEXT_TAG
         # 2) 打包插件 zip（manifest.json 已是新版本号）
         - name: pack-extension-zip
           script: !reference [.pack-script]
@@ -46,7 +49,6 @@ master:
         # 4) 创建 Release（tag 不存在时自动创建并推送）
         - name: create-release
           type: git:release
-          imports: /tmp/release.env
           options:
             tag: $NEXT_TAG
             descriptionFromFile: RELEASE_NOTES.md
@@ -59,7 +61,6 @@ master:
         # 6) 把版本号更新提交回 master，[skip ci] 防止循环触发
         - name: commit-version-bump
           script: |
-            . /tmp/release.env
             git config user.name "cnb-bot"
             git config user.email "bot@cnb.cool"
             git add manifest.json
@@ -72,7 +73,6 @@ master:
             fi
         - name: print-release-url
           script: |
-            . /tmp/release.env
             echo "=============================================="
             echo ">>> 🎉 Release $NEXT_TAG 已自动发布"
             echo ">>> 查看/下载: https://$CNB_WEB_HOST/$CNB_REPO_SLUG/-/releases"
