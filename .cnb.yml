@@ -17,8 +17,6 @@ include:
 master:
   push:
     - name: pack-extension
-      docker:
-        image: debian:bookworm-slim
       stages:
         - name: install-deps
           script: |
@@ -40,8 +38,6 @@ master:
 "$":
   tag_push:
     - name: release-extension
-      docker:
-        image: debian:bookworm-slim
       stages:
         - name: install-deps
           script: |
