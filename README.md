@@ -9,7 +9,7 @@
 | 项 | 内容 |
 |---|---|
 | 名称 | HuaRec 花录 · 电影感网页录屏 |
-| 版本 | 1.0.0 |
+| 版本 | 1.2.1 |
 | 类型 | Chrome 扩展(Manifest V3) |
 | 运行环境 | Chrome / Edge 等 Chromium 内核浏览器,支持 `chrome.tabCapture` 与 `offscreen` |
 | 录制范围 | 当前标签页(http/https) |
