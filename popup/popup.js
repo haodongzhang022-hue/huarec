@@ -91,6 +91,18 @@ async function init() {
   const st = await chrome.runtime.sendMessage({ type: 'GET_STATE' }).catch(() => ({ status: 'idle' }));
   setView(st || { status: 'idle' });
 
+  // 打开弹窗时自动切换:当前标签页 ≠ 录制标签页 → 自动 SWITCH_RECORDING
+  // 用户打开弹窗 = Chrome 已完成扩展交互,switchToTab 此时取流必成。
+  if (st && (st.status === 'recording' || st.status === 'paused') && st.tabId) {
+    const [curTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    if (curTab && curTab.id !== st.tabId && /^(https?|file):/i.test(curTab.url || '')) {
+      const r = await chrome.runtime.sendMessage({ type: 'SWITCH_RECORDING' }).catch(() => null);
+      if (r && r.ok) { window.close(); return; }
+      // 自动切换失败(罕见:同 TabId 但已导航等边缘场景)→ 展示引导让用户手动切
+      $('switchGuide').hidden = false;
+    }
+  }
+
   $('start').addEventListener('click', start);
   $('switchHere').addEventListener('click', async () => {
     const r = await chrome.runtime.sendMessage({ type: 'SWITCH_RECORDING' }).catch(() => null);
@@ -121,11 +133,15 @@ function setView(st) {
   $('live').hidden = !live;
   if (!live) { stopTimer(); return; }
 
-  // 当前标签页 ≠ 被录标签页 → 提供手动接力按钮(自动接力被 Chrome 拒绝时的兜底)
+  // 当前标签页 ≠ 被录标签页 → 展示清晰引导 + 手动接力按钮(极少数自动切换失败的兜底)
+  $('switchGuide').hidden = true;
   $('switchHere').hidden = true;
   if (status !== 'saving' && st.tabId) {
     chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-      if (tab && tab.id !== st.tabId && /^(https?|file):/i.test(tab.url || '')) $('switchHere').hidden = false;
+      if (tab && tab.id !== st.tabId && /^(https?|file):/i.test(tab.url || '')) {
+        $('switchGuide').hidden = false;
+        $('switchHere').hidden = false;
+      }
     });
   }
 

@@ -312,14 +312,37 @@ async function switchToTab(tabId) {
 
 // 录制中用户切换了标签页 → 自动接力跟过去。
 // Chrome 对「没在上面点过扩展」的标签页可能拒绝取流:失败就保持录原页,
-// 角标变 ⇄ 提示,在新页上打开 HuaRec 弹窗点「切到当前页」即可手动接力(弹窗即授权)。
+// 角标变 ⇄ 提示,发浏览器通知引导用户点扩展图标,在新页上打开弹窗即可自动接力。
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   const st = await getState();
   if (st.status !== 'recording' && st.status !== 'paused') return;
   if (tabId === st.tabId) return;
   const r = await switchToTab(tabId);
-  if (r.ok) chrome.action.setBadgeText({ text: st.status === 'paused' ? 'II' : 'REC' });
-  else chrome.action.setBadgeText({ text: '⇄' });
+  if (r.ok) {
+    chrome.action.setBadgeText({ text: st.status === 'paused' ? 'II' : 'REC' });
+  } else {
+    chrome.action.setBadgeText({ text: '⇄' });
+    // auto-switch 失败 → 浏览器通知引导用户点扩展图标
+    try {
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      const title = tab?.title || '当前页面';
+      chrome.notifications.create('huarec-switch-fail', {
+        type: 'basic',
+        iconUrl: 'icons/icon48.png',
+        title: 'HuaRec · 录制未切换',
+        message: `正在录制其他标签页。点击扩展图标即可切到「${title.length > 40 ? title.slice(0, 37) + '…' : title}」`,
+        priority: 2,
+      });
+    } catch (_) {}
+  }
+});
+
+// 点击通知 → 打开 popup(用户打开弹窗那一刻 popup 会自动完成切换)
+chrome.notifications.onClicked.addListener((id) => {
+  if (id === 'huarec-switch-fail') {
+    chrome.notifications.clear('huarec-switch-fail');
+    chrome.action.openPopup();
+  }
 });
 
 // 兜底抢救:offscreen 已死/无响应时,用已落库的切片直接拼出成片(WebM 流式格式,半截可播)
