@@ -1,46 +1,83 @@
-# HuaRec 花录 — Chrome 扩展发版流水线
+# HuaRec 花录 — Chrome 扩展全自动发版流水线
 #
-# 流程说明：
-#   1. master push     : 每次项目更新，打包浏览器插件 zip 并上传为 Commit 附件，
-#                        用户可在仓库「制品 / 附件」中直接下载最新构建
-#   2. tag_push(v*)    : 打包 zip，直接挂载为 Release 附件，并创建 Release
-#                       （Release 页面即可直接下载 zip，无需跳转）
-#   3. CI 失败自动修复  : 上述流水线任一环节报错时，failStages 自动唤醒 NPC
-#                        读取失败日志、尝试修复并推送新提交，全程无需人工介入
+# 流程说明（核心目标：类似成熟开源仓库的 Release 体验 —— 非常自动、非常醒目）：
+#
+#   1. master push（每次更新）:
+#        自动递增 patch 版本号 → 打包插件 zip → 自动打 tag(vX.Y.Z) 并推送
+#        → 自动创建 Release → zip 挂载为 Release 附件
+#        → 自动提交版本号更新回 master（[skip ci]，不触发新一轮流水线）
+#      用户打开仓库「发行版 / Releases」页即可看到最新版本 + 醒目的 zip 下载按钮，
+#      全程零人工操作。
+#
+#   2. tag_push(v*)（手动打 tag 发版）:
+#        打包 zip → 创建 Release → zip 挂载为 Release 附件（与自动流程一致的体验）
+#
+#   3. CI 失败自动修复:
+#        上述流水线任一环节报错时，failStages 自动唤醒 NPC 读取失败日志、
+#        尝试修复并推送新提交，全程无需人工介入
 #
 # zip 内只保留浏览器插件运行所需文件（manifest.json / js / html / css /
 # icons / 壁纸 / 第三方库），剔除开发脚本、原始素材、文档等无关内容。
 #
-# 附件上传统一使用官方插件 cnbcool/attachments（Node 镜像，自带上传逻辑），
-# 替代原先手写 curl 调用 REST API 的方式，更健壮且无需在构建环境安装 curl。
+# 附件上传使用官方插件 cnbcool/attachments（Node 镜像，自带上传逻辑），
+# 在 tag_push 事件下会自动将文件挂载到同 tag 的 Release 上。
 
 include:
   - .ci/release-scripts.yml
   - .ci/auto-fix.yml
 
-# ── master 分支：每次更新打包插件 zip，作为附件供用户直接下载 ──
+# ── master push：全自动发版（版本号递增 + tag + Release + zip 附件）──
 master:
   push:
-    - name: pack-extension
+    - name: auto-release
       stages:
         - name: install-deps
           script: |
-            apt-get update && apt-get install -y --no-install-recommends zip
+            apt-get update && apt-get install -y --no-install-recommends zip git ca-certificates
+        # 1) 自动递增 patch 版本号，写入 /tmp/release.env（NEXT_VERSION / NEXT_TAG）
+        - name: bump-version
+          script: !reference [.bump-version-script]
+        # 2) 打包插件 zip（manifest.json 已是新版本号）
         - name: pack-extension-zip
           script: !reference [.pack-script]
-        # 上传为 Commit 附件（仓库「制品」中可见，下载链接永久有效）
-        - name: upload-zip-asset
+        # 3) 生成 Release 更新说明（最近 10 条提交）
+        - name: write-release-notes
+          script: !reference [.release-notes-script]
+        # 4) 创建 Release（tag 不存在时自动创建并推送）
+        - name: create-release
+          type: git:release
+          imports: /tmp/release.env
+          options:
+            tag: $NEXT_TAG
+            descriptionFromFile: RELEASE_NOTES.md
+        # 5) zip 挂载为 Release 附件（tag_push 上下文下插件自动挂到同 tag 的 Release）
+        - name: upload-release-asset
           image: cnbcool/attachments:latest
           settings:
             attachments:
               - "./*.zip"
-          exports:
-            FILES: FILES
-        - name: print-download-url
+        # 6) 把版本号更新提交回 master，[skip ci] 防止循环触发
+        - name: commit-version-bump
           script: |
-            VERSION=$(grep -o '"version"[^,]*' manifest.json | cut -d'"' -f4)
-            echo ">>> 附件已上传: $FILES"
-            echo ">>> 下载地址: https://$CNB_WEB_HOST/$CNB_REPO_SLUG/-/commit/$CNB_COMMIT/huarec-$VERSION.zip"
+            . /tmp/release.env
+            git config user.name "cnb-bot"
+            git config user.email "bot@cnb.cool"
+            git add manifest.json
+            if git diff --cached --quiet; then
+              echo ">>> manifest.json 无变化，跳过提交"
+            else
+              git commit -m "chore(release): 自动发版 $NEXT_TAG — 版本号递增 [skip ci]"
+              git push "https://oauth2:${CNB_TOKEN}@$CNB_WEB_HOST/$CNB_REPO_SLUG.git" HEAD:master
+              echo ">>> 版本号已提交回 master: $NEXT_VERSION"
+            fi
+        - name: print-release-url
+          script: |
+            . /tmp/release.env
+            echo "=============================================="
+            echo ">>> 🎉 Release $NEXT_TAG 已自动发布"
+            echo ">>> 查看/下载: https://$CNB_WEB_HOST/$CNB_REPO_SLUG/-/releases"
+            echo ">>> zip 直链:  https://$CNB_WEB_HOST/$CNB_REPO_SLUG/-/releases/download/$NEXT_TAG/huarec-$NEXT_VERSION.zip"
+            echo "=============================================="
       # ── CI 报错自动处理：失败后唤醒 NPC 自动诊断修复 ──
       failStages:
         - name: auto-fix-ci-failure
@@ -50,7 +87,7 @@ master:
             systemPrompt: !reference [.auto-fix-system-prompt]
             userPrompt: !reference [.auto-fix-user-prompt]
 
-# ── Tag(v*)：打包 + zip 直接挂载为 Release 附件 + 创建 Release ──
+# ── Tag(v*)：手动打 tag 发版（与自动流程一致的 Release 体验）──
 "$":
   tag_push:
     - name: release-extension
