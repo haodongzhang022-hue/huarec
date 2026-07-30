@@ -3,12 +3,15 @@
 # 流程说明：
 #   1. master push     : 每次项目更新，打包浏览器插件 zip 并上传为 Commit 附件
 #   2. tag_push(v*)    : 打包 zip 上传，并创建 Release（描述内附 zip 下载链接）
+#   3. CI 失败自动修复  : 上述流水线任一环节报错时，failStages 自动唤醒 NPC
+#                        读取失败日志、尝试修复并推送新提交，全程无需人工介入
 #
 # zip 内只保留浏览器插件运行所需文件（manifest.json / js / html / css /
 # icons / 壁纸 / 第三方库），剔除开发脚本、原始素材、文档等无关内容。
 
 include:
   - .ci/release-scripts.yml
+  - .ci/auto-fix.yml
 
 # ── master 分支：每次更新打包插件 zip ────────────────
 master:
@@ -21,6 +24,14 @@ master:
           script: !reference [.pack-script]
         - name: upload-commit-asset
           script: !reference [.upload-script]
+      # ── CI 报错自动处理：失败后唤醒 NPC 自动诊断修复 ──
+      failStages:
+        - name: auto-fix-ci-failure
+          type: npc:go
+          options:
+            maxTurns: 30
+            systemPrompt: !reference [.auto-fix-system-prompt]
+            userPrompt: !reference [.auto-fix-user-prompt]
 
 # ── Tag(v*)：打包 + 创建 Release ─────────────────────
 "$":
@@ -54,3 +65,11 @@ master:
           options:
             tag: $CNB_BRANCH
             descriptionFromFile: RELEASE_NOTES.md
+      # ── CI 报错自动处理：失败后唤醒 NPC 自动诊断修复 ──
+      failStages:
+        - name: auto-fix-ci-failure
+          type: npc:go
+          options:
+            maxTurns: 30
+            systemPrompt: !reference [.auto-fix-system-prompt]
+            userPrompt: !reference [.auto-fix-user-prompt]
