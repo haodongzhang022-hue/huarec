@@ -80,11 +80,12 @@ if [ -z "${RELEASE_ID}" ]; then
   CREATE_JSON=$(cnb releases post-release --repo "${CNB_REPO_SLUG}" \
     --tag-name "${TAG}" --target-commitish "${CNB_COMMIT}" \
     --name "HuaRec 花录 · 最新版（自动更新）" \
-    --make-latest false --body-file "${BODY_FILE}" --verbose)
+    --body-file "${BODY_FILE}" --verbose)
   RELEASE_ID=$(echo "${CREATE_JSON}" | jq -r '.data.id // .data.release.id')
 else
-  echo "    Release 已存在（id=${RELEASE_ID}），更新描述与目标 commit"
+  echo "    Release 已存在（id=${RELEASE_ID}），更新标题/描述"
   cnb releases patch-release --repo "${CNB_REPO_SLUG}" --release-id "${RELEASE_ID}" \
+    --name "HuaRec 花录 · 最新版（自动更新）" \
     --body-file "${BODY_FILE}" >/dev/null
 fi
 echo "    RELEASE_ID=${RELEASE_ID}"

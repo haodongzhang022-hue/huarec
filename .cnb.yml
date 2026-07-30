@@ -50,6 +50,8 @@ master:
 "$":
   tag_push:
     - name: release-extension
+      # latest tag 由 master push 的 auto-release 流程维护，不重复处理
+      if: '[ "$CNB_BRANCH" != "latest" ]'
       docker:
         build:
           dockerfile: ./Dockerfile
