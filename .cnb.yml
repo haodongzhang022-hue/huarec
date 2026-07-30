@@ -1,0 +1,56 @@
+# HuaRec 花录 — Chrome 扩展发版流水线
+#
+# 流程说明：
+#   1. master push     : 每次项目更新，打包浏览器插件 zip 并上传为 Commit 附件
+#   2. tag_push(v*)    : 打包 zip 上传，并创建 Release（描述内附 zip 下载链接）
+#
+# zip 内只保留浏览器插件运行所需文件（manifest.json / js / html / css /
+# icons / 壁纸 / 第三方库），剔除开发脚本、原始素材、文档等无关内容。
+
+include:
+  - .ci/release-scripts.yml
+
+# ── master 分支：每次更新打包插件 zip ────────────────
+master:
+  push:
+    - name: pack-extension
+      docker:
+        image: cnb.cool/cnb/public-images/alpine-zip:latest
+      stages:
+        - name: pack-extension-zip
+          script: !reference [.pack-script]
+        - name: upload-commit-asset
+          script: !reference [.upload-script]
+
+# ── Tag(v*)：打包 + 创建 Release ─────────────────────
+"$":
+  tag_push:
+    - name: release-extension
+      docker:
+        image: cnb.cool/cnb/public-images/alpine-zip:latest
+      stages:
+        - name: pack-extension-zip
+          script: !reference [.pack-script]
+        - name: upload-commit-asset
+          script: !reference [.upload-script]
+          exports:
+            ASSET_URL: ASSET_URL
+        - name: write-release-notes
+          script: |
+            VERSION=$(grep -o '"version"[^,]*' manifest.json | cut -d'"' -f4)
+            cat > RELEASE_NOTES.md <<EOF
+            ## HuaRec 花录 ${CNB_BRANCH}
+
+            Chrome 浏览器扩展安装包：[\`huarec-${VERSION}.zip\`](${ASSET_URL})
+
+            ### 安装方式
+            1. 下载并解压 zip 到本地目录（解压后目录内应直接包含 \`manifest.json\`）
+            2. 打开 Chrome，访问 \`chrome://extensions/\`
+            3. 开启右上角「开发者模式」
+            4. 点击「加载已解压的扩展程序」，选择解压后的目录
+            EOF
+        - name: create-release
+          type: git:release
+          options:
+            tag: $CNB_BRANCH
+            descriptionFromFile: RELEASE_NOTES.md

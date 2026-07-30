@@ -1,0 +1,37 @@
+# Release 流水线公共脚本（被 .cnb.yml include 后通过 !reference 引用）
+# pack-script: 仅打包浏览器插件运行所需文件为 zip
+# upload-script: 将 zip 上传为 Commit 附件并导出附件地址
+
+.pack-script: |
+  set -e
+  VERSION=$(grep -o '"version"[^,]*' manifest.json | cut -d'"' -f4)
+  echo ">>> manifest version: $VERSION"
+  STAGE_DIR="huarec-$VERSION"
+  ZIP_NAME="huarec-$VERSION.zip"
+  rm -rf "$STAGE_DIR" "$ZIP_NAME"
+  mkdir -p "$STAGE_DIR"
+  # 仅拷贝浏览器插件相关文件
+  cp manifest.json background.js offscreen.html offscreen.js permission.html permission.js "$STAGE_DIR"/
+  cp -r content editor icons lib popup assets "$STAGE_DIR"/
+  # 剔除与插件运行无关的内容
+  rm -f "$STAGE_DIR/icons/make_icons.py"
+  rm -rf "$STAGE_DIR/assets/wallpapers/_raw"
+  cd "$STAGE_DIR"
+  zip -r "../$ZIP_NAME" .
+  cd ..
+  ls -lh "$ZIP_NAME"
+
+.upload-script: |
+  set -e
+  VERSION=$(grep -o '"version"[^,]*' manifest.json | cut -d'"' -f4)
+  ZIP_NAME="huarec-$VERSION.zip"
+  echo ">>> 上传 $ZIP_NAME 为 Commit 附件"
+  UPLOAD_JSON=$(cnb git post-commit-asset-upload-url \
+    --repo "$CNB_REPO_SLUG" --sha "$CNB_COMMIT" --name "$ZIP_NAME")
+  UPLOAD_URL=$(echo "$UPLOAD_JSON" | grep -o '"url"[^,]*' | cut -d'"' -f4)
+  curl -fsS -X PUT -T "$ZIP_NAME" "$UPLOAD_URL"
+  cnb git post-commit-asset-upload-confirmation \
+    --repo "$CNB_REPO_SLUG" --sha "$CNB_COMMIT" --name "$ZIP_NAME"
+  ASSET_URL="https://$CNB_WEB_HOST/$CNB_REPO_SLUG/-/commit/$CNB_COMMIT/$ZIP_NAME"
+  echo ">>> 附件地址: $ASSET_URL"
+  echo "##[set-output ASSET_URL=$ASSET_URL]"
