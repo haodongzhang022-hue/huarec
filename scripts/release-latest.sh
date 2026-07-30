@@ -107,24 +107,31 @@ HTTP_CODE=$(curl -sS -o "${WORK_DIR}/put_resp.json" -w "%{http_code}" -X PUT \
 echo "    PUT ${HTTP_CODE}"
 [ "${HTTP_CODE}" -ge 200 ] && [ "${HTTP_CODE}" -lt 300 ] || { cat "${WORK_DIR}/put_resp.json" >&2; exit 1; }
 
-# 解析确认参数（verify_url 查询串或响应字段，两种格式都兼容）
+# 解析确认参数：verify_url 格式为
+#   https://api.<host>/<slug>/-/releases/<id>/asset-upload-confirmation/<upload_token>/<url编码的asset_path>?ttl=0
+# upload_token 与 asset_path 在 URL 路径段中（非查询参数），需按路径段提取并做 URL 解码。
 VERIFY_URL=$(echo "${UP_JSON}" | jq -r '.data.verify_url // empty')
 UPLOAD_TOKEN=""
 ASSET_PATH=""
 if [ -n "${VERIFY_URL}" ]; then
-  UPLOAD_TOKEN=$(echo "${VERIFY_URL}" | sed -n 's/.*[?&]upload_token=\([^&]*\).*/\1/p')
-  ASSET_PATH=$(echo "${VERIFY_URL}" | sed -n 's/.*[?&]asset_path=\([^&]*\).*/\1/p')
+  URL_PATH="${VERIFY_URL%%\?*}"   # 去掉 ?ttl=0 查询串
+  UPLOAD_TOKEN=$(echo "${URL_PATH}" | sed -n 's|.*/asset-upload-confirmation/\([^/]*\)/.*|\1|p')
+  RAW_ASSET_PATH=$(echo "${URL_PATH}" | sed -n 's|.*/asset-upload-confirmation/[^/]*/\(.*\)|\1|p')
+  # URL 解码（%2F -> / 等），纯 bash 实现避免依赖 python
+  ASSET_PATH=$(printf '%b' "${RAW_ASSET_PATH//%/\\x}")
 fi
 UPLOAD_TOKEN=${UPLOAD_TOKEN:-$(echo "${UP_JSON}" | jq -r '.data.upload_token // empty')}
 ASSET_PATH=${ASSET_PATH:-$(echo "${UP_JSON}" | jq -r '.data.asset_path // empty')}
 
-if [ -n "${UPLOAD_TOKEN}" ] && [ -n "${ASSET_PATH}" ]; then
-  cnb releases post-release-asset-upload-confirmation --repo "${CNB_REPO_SLUG}" \
-    --release-id "${RELEASE_ID}" --upload-token "${UPLOAD_TOKEN}" --asset-path "${ASSET_PATH}" --ttl 0 >/dev/null
-  echo "    附件上传已确认"
-else
-  echo "    未解析到 upload_token/asset_path，跳过确认（PUT 已成功）"
+if [ -z "${UPLOAD_TOKEN}" ] || [ -z "${ASSET_PATH}" ]; then
+  # 缺少确认参数会导致附件不会挂载到 Release（下载 404），必须视为失败而非跳过
+  echo "!! 无法从 verify_url 解析 upload_token/asset_path，附件将无法挂载到 Release" >&2
+  echo "   verify_url: ${VERIFY_URL}" >&2
+  exit 1
 fi
+cnb releases post-release-asset-upload-confirmation --repo "${CNB_REPO_SLUG}" \
+  --release-id "${RELEASE_ID}" --upload-token "${UPLOAD_TOKEN}" --asset-path "${ASSET_PATH}" --ttl 0 >/dev/null
+echo "    附件上传已确认: ${ASSET_PATH}"
 
 echo "==> 6/6 提交版本号 bump 回 master（[skip ci] 防循环触发）"
 git config user.name "cnb-bot"
