@@ -97,4 +97,11 @@ kbd { background: var(--card); border: 1px solid var(--line); border-radius: 4px
 .ghost-line { all: unset; cursor: pointer; display: block; width: 100%; box-sizing: border-box; text-align: center; margin-top: 9px; padding: 8px; font-size: 12px; color: var(--dim); border-radius: 9px; }
 .ghost-line:hover { background: var(--card); color: var(--text); }
 
+.switch-guide {
+  margin-top: 10px; padding: 9px 12px; font-size: 12px; color: var(--text);
+  background: linear-gradient(135deg, rgba(255,107,74,0.12), rgba(255,154,134,0.08));
+  border-radius: 10px; text-align: center; line-height: 1.5;
+  border: 1px solid rgba(255,107,74,0.18);
+}
+
 .error { margin-top: 12px; font-size: 12px; color: #ff9a86; background: rgba(255,107,74,0.1); padding: 9px 11px; border-radius: 10px; line-height: 1.5; }

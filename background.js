@@ -312,14 +312,35 @@ async function switchToTab(tabId) {
 
 // 录制中用户切换了标签页 → 自动接力跟过去。
 // Chrome 对「没在上面点过扩展」的标签页可能拒绝取流:失败就保持录原页,
-// 角标变 ⇄ 提示,在新页上打开 HuaRec 弹窗点「切到当前页」即可手动接力(弹窗即授权)。
+// 角标变 ⇄ 提示,并弹浏览器通知引导用户在新标签页上点击扩展图标。
+let lastAutoSwitchFailed = 0;
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   const st = await getState();
   if (st.status !== 'recording' && st.status !== 'paused') return;
   if (tabId === st.tabId) return;
   const r = await switchToTab(tabId);
-  if (r.ok) chrome.action.setBadgeText({ text: st.status === 'paused' ? 'II' : 'REC' });
-  else chrome.action.setBadgeText({ text: '⇄' });
+  if (r.ok) {
+    lastAutoSwitchFailed = 0;
+    chrome.action.setBadgeText({ text: st.status === 'paused' ? 'II' : 'REC' });
+  } else {
+    // 角标统一在分支外设置，避免双写遗漏（见审查问题 1）
+    const now = Date.now();
+    // 30 秒内不重复弹通知,避免切来切去刷屏
+    if (now - lastAutoSwitchFailed > 30000) {
+      lastAutoSwitchFailed = now;
+      try {
+        chrome.notifications.create('huarec-switch-fail', {
+          type: 'basic',
+          iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+          title: 'HuaRec 录制仍在继续',
+          message: '录制仍在原标签页进行，点击扩展图标即可切到当前页',
+          priority: 2,
+          isClickable: true,
+        });
+      } catch (_) {}
+    }
+    chrome.action.setBadgeText({ text: '⇄' });
+  }
 });
 
 // 兜底抢救:offscreen 已死/无响应时,用已落库的切片直接拼出成片(WebM 流式格式,半截可播)
@@ -460,6 +481,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
 
 chrome.commands.onCommand.addListener((cmd) => {
   if (cmd === 'toggle-recording') toggle();
+});
+
+// 点击切换失败通知 → 打开弹窗让用户一键接力（弹窗即授权）
+chrome.notifications.onClicked.addListener((id) => {
+  if (id === 'huarec-switch-fail') {
+    chrome.notifications.clear('huarec-switch-fail');
+    chrome.action.openPopup().catch(() => {});
+  }
 });
 
 // 录制期间的保活 alarm:醒来读一次状态即可,目的就是把 SW 唤醒、维持录制链路可靠
