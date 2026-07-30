@@ -27,22 +27,23 @@
   ZIP_NAME="huarec-$VERSION.zip"
   echo ">>> 上传 $ZIP_NAME 为 Commit 附件"
   FILE_SIZE=$(stat -c%s "$ZIP_NAME")
-  # 1. 通过 API 获取上传预签名 URL
+  # 1. 通过 API 获取上传预签名 URL（sha 在 URL 路径，asset_name/size 为必填字段）
   UPLOAD_JSON=$(curl -fsS -X POST \
     -H "Authorization: Bearer $CNB_TOKEN" \
     -H "Content-Type: application/json" \
     -H "Accept: application/vnd.cnb.api+json" \
     -d "{\"asset_name\":\"$ZIP_NAME\",\"size\":$FILE_SIZE}" \
     "${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/git/commit-assets/${CNB_COMMIT}/asset-upload-url")
-  UPLOAD_URL=$(echo "$UPLOAD_JSON" | grep -o '"upload_url":"[^"]*"' | cut -d'"' -f4)
-  VERIFY_URL=$(echo "$UPLOAD_JSON" | grep -o '"verify_url":"[^"]*"' | cut -d'"' -f4)
+  UPLOAD_URL=$(printf '%s' "$UPLOAD_JSON" | sed -n 's/.*"upload_url":"\([^"]*\)".*/\1/p')
+  VERIFY_URL=$(printf '%s' "$UPLOAD_JSON" | sed -n 's/.*"verify_url":"\([^"]*\)".*/\1/p')
+  [ -n "$UPLOAD_URL" ] && [ -n "$VERIFY_URL" ] || { echo "!!! 解析上传地址失败: $UPLOAD_JSON"; exit 1; }
   # 2. PUT 上传文件
   curl -fsS -X PUT -T "$ZIP_NAME" "$UPLOAD_URL"
-  # 3. 确认上传
+  # 3. 确认上传（verify_url 已含 ?ttl=0 查询参数）
   curl -fsS -X POST \
     -H "Authorization: Bearer $CNB_TOKEN" \
     -H "Accept: application/vnd.cnb.api+json" \
-    "${VERIFY_URL}?ttl=0"
+    "$VERIFY_URL"
   ASSET_URL="https://$CNB_WEB_HOST/$CNB_REPO_SLUG/-/commit/$CNB_COMMIT/$ZIP_NAME"
   echo ">>> 附件地址: $ASSET_URL"
   echo "##[set-output ASSET_URL=$ASSET_URL]"
